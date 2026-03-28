@@ -86,12 +86,47 @@ export async function getProviderInfo() {
   return fetchApi<ProviderInfo>('provider-info')
 }
 
+/** Full connection status from API */
+export interface ConnectionStatus {
+  provider: string
+  provider_name: string
+  connected: boolean
+  token_valid: boolean
+  token_expires_in_minutes: number | null
+  features: {
+    has_insurance_data: boolean
+    has_commission_data: boolean
+    has_prepared_briefings: boolean
+    has_deal_stages: boolean
+    currency: string
+  }
+  connection_name: string
+  last_sync: string | null
+  refresh_error: string | null
+}
+
+export async function getConnectionStatus() {
+  return fetchApi<ConnectionStatus>('connection-status')
+}
+
 /** Test API connection — returns true if key is valid */
 export async function testConnection(): Promise<boolean> {
   try {
-    await getProviderInfo()
+    await getConnectionStatus()
     return true
   } catch {
     return false
   }
+}
+
+/** Save QR-scanned config to localStorage */
+export function saveQRConfig(data: { key: string; url: string }): void {
+  localStorage.setItem('insurvision_api_key', data.key)
+  if (data.url) localStorage.setItem('insurvision_api_url', data.url)
+}
+
+/** Clear all stored config */
+export function clearConfig(): void {
+  localStorage.removeItem('insurvision_api_key')
+  localStorage.removeItem('insurvision_api_url')
 }
