@@ -1,0 +1,21 @@
+{
+  "name": "insurvision",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "pack": "npm run build && evenhub-cli pack app.json dist"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@evenrealities/even_hub_sdk": "latest"
+  },
+  "devDependencies": {
+    "@evenrealities/evenhub-simulator": "latest",
+    "@evenrealities/evenhub-cli": "latest",
+    "typescript": "^5.4.0",
+    "vite": "^5.0.0"
+  }
+}
