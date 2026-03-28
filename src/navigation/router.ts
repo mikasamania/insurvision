@@ -1,60 +1,63 @@
 import type { EvenAppBridge } from '../types/bridge'
 import type {
-  Appointment,
-  CustomerBriefingResponse,
-  Contract,
-  Reminder,
+  VisionAppointment,
+  VisionContactBriefing,
+  VisionDeal,
+  VisionTask,
 } from '../types/api'
 import {
-  getCustomerBriefing,
-  getCustomerContracts,
-  getCustomerReminders,
+  getContactBriefing,
+  getContactDeals,
+  getContactTasks,
 } from '../api/client'
 import {
   showAppointmentPage,
   getAppointmentPageCount,
 } from '../pages/appointments'
 import { showBriefing } from '../pages/briefing'
-import { showContractPage, getContractPageCount } from '../pages/contracts'
-import { showReminderPage, getReminderPageCount } from '../pages/reminders'
+import { showDealPage, getDealPageCount } from '../pages/contracts'
+import { showTaskPage, getTaskPageCount } from '../pages/reminders'
 
-type Screen =
-  | 'appointments'
-  | 'briefing'
-  | 'contracts'
-  | 'reminders'
+type Screen = 'appointments' | 'briefing' | 'deals' | 'tasks'
 
 interface RouterState {
   screen: Screen
-  appointments: Appointment[]
-  selectedAppointmentIndex: number
+  provider: string
+  isInsurance: boolean
+  appointments: VisionAppointment[]
+  selectedIndex: number
   appointmentPage: number
-  briefing: CustomerBriefingResponse | null
-  contracts: Contract[]
-  contractPage: number
-  reminders: Reminder[]
-  reminderPage: number
+  briefing: VisionContactBriefing | null
+  deals: VisionDeal[]
+  dealPage: number
+  tasks: VisionTask[]
+  taskPage: number
 }
 
 export class Router {
   private state: RouterState
   private bridge: EvenAppBridge
 
-  constructor(bridge: EvenAppBridge, appointments: Appointment[]) {
+  constructor(
+    bridge: EvenAppBridge,
+    appointments: VisionAppointment[],
+    provider: string
+  ) {
     this.bridge = bridge
     this.state = {
       screen: 'appointments',
+      provider,
+      isInsurance: provider === 'insurcrm',
       appointments,
-      selectedAppointmentIndex: 0,
+      selectedIndex: 0,
       appointmentPage: 0,
       briefing: null,
-      contracts: [],
-      contractPage: 0,
-      reminders: [],
-      reminderPage: 0,
+      deals: [],
+      dealPage: 0,
+      tasks: [],
+      taskPage: 0,
     }
 
-    // Register input handlers
     bridge.onTouchEvent((event) => {
       if (event === 'tap_right') this.onRight()
       if (event === 'tap_left') this.onLeft()
@@ -77,13 +80,13 @@ export class Router {
         await showAppointmentPage(this.bridge, s.appointments, s.appointmentPage)
         break
       case 'briefing':
-        if (s.briefing) await showBriefing(this.bridge, s.briefing)
+        if (s.briefing) await showBriefing(this.bridge, s.briefing, s.provider)
         break
-      case 'contracts':
-        await showContractPage(this.bridge, s.contracts, s.contractPage)
+      case 'deals':
+        await showDealPage(this.bridge, s.deals, s.dealPage, s.isInsurance)
         break
-      case 'reminders':
-        await showReminderPage(this.bridge, s.reminders, s.reminderPage)
+      case 'tasks':
+        await showTaskPage(this.bridge, s.tasks, s.taskPage, s.isInsurance)
         break
     }
   }
@@ -94,50 +97,45 @@ export class Router {
     switch (s.screen) {
       case 'appointments': {
         const totalPages = getAppointmentPageCount(s.appointments)
-        // If there are more appointment pages, go to next page
         if (s.appointmentPage < totalPages - 1) {
           s.appointmentPage++
-          s.selectedAppointmentIndex = s.appointmentPage * 2
+          s.selectedIndex = s.appointmentPage * 2
         } else {
-          // Select current appointment and load briefing
-          const apt = s.appointments[s.selectedAppointmentIndex]
-          if (apt?.customer?.id) {
-            await this.loadBriefing(apt.customer.id)
+          const apt = s.appointments[s.selectedIndex]
+          if (apt?.contact?.id) {
+            await this.loadBriefing(apt.contact.id)
           }
         }
         break
       }
       case 'briefing': {
-        // Go to contracts
-        const customerId = this.getCurrentCustomerId()
-        if (customerId && s.contracts.length === 0) {
-          await this.loadContracts(customerId)
+        const contactId = this.getCurrentContactId()
+        if (contactId && s.deals.length === 0) {
+          await this.loadDeals(contactId)
         }
-        s.screen = 'contracts'
-        s.contractPage = 0
+        s.screen = 'deals'
+        s.dealPage = 0
         break
       }
-      case 'contracts': {
-        const totalPages = getContractPageCount(s.contracts)
-        if (s.contractPage < totalPages - 1) {
-          s.contractPage++
+      case 'deals': {
+        const totalPages = getDealPageCount(s.deals)
+        if (s.dealPage < totalPages - 1) {
+          s.dealPage++
         } else {
-          // Go to reminders
-          const customerId = this.getCurrentCustomerId()
-          if (customerId && s.reminders.length === 0) {
-            await this.loadReminders(customerId)
+          const contactId = this.getCurrentContactId()
+          if (contactId && s.tasks.length === 0) {
+            await this.loadTasks(contactId)
           }
-          s.screen = 'reminders'
-          s.reminderPage = 0
+          s.screen = 'tasks'
+          s.taskPage = 0
         }
         break
       }
-      case 'reminders': {
-        const totalPages = getReminderPageCount(s.reminders)
-        if (s.reminderPage < totalPages - 1) {
-          s.reminderPage++
+      case 'tasks': {
+        const totalPages = getTaskPageCount(s.tasks)
+        if (s.taskPage < totalPages - 1) {
+          s.taskPage++
         }
-        // At end of reminders — do nothing (stay)
         break
       }
     }
@@ -152,25 +150,25 @@ export class Router {
       case 'appointments':
         if (s.appointmentPage > 0) {
           s.appointmentPage--
-          s.selectedAppointmentIndex = s.appointmentPage * 2
+          s.selectedIndex = s.appointmentPage * 2
         }
         break
       case 'briefing':
         s.screen = 'appointments'
         break
-      case 'contracts':
-        if (s.contractPage > 0) {
-          s.contractPage--
+      case 'deals':
+        if (s.dealPage > 0) {
+          s.dealPage--
         } else {
           s.screen = 'briefing'
         }
         break
-      case 'reminders':
-        if (s.reminderPage > 0) {
-          s.reminderPage--
+      case 'tasks':
+        if (s.taskPage > 0) {
+          s.taskPage--
         } else {
-          s.screen = 'contracts'
-          s.contractPage = 0
+          s.screen = 'deals'
+          s.dealPage = 0
         }
         break
     }
@@ -178,35 +176,35 @@ export class Router {
     await this.render()
   }
 
-  private getCurrentCustomerId(): string | null {
-    const apt = this.state.appointments[this.state.selectedAppointmentIndex]
-    return apt?.customer?.id || null
+  private getCurrentContactId(): string | null {
+    const apt = this.state.appointments[this.state.selectedIndex]
+    return apt?.contact?.id || null
   }
 
-  private async loadBriefing(customerId: string): Promise<void> {
+  private async loadBriefing(contactId: string): Promise<void> {
     try {
-      this.state.briefing = await getCustomerBriefing(customerId)
+      this.state.briefing = await getContactBriefing(contactId)
       this.state.screen = 'briefing'
     } catch (e) {
       console.error('Failed to load briefing:', e)
     }
   }
 
-  private async loadContracts(customerId: string): Promise<void> {
+  private async loadDeals(contactId: string): Promise<void> {
     try {
-      const res = await getCustomerContracts(customerId)
-      this.state.contracts = res.contracts
+      const res = await getContactDeals(contactId)
+      this.state.deals = res.deals
     } catch (e) {
-      console.error('Failed to load contracts:', e)
+      console.error('Failed to load deals:', e)
     }
   }
 
-  private async loadReminders(customerId: string): Promise<void> {
+  private async loadTasks(contactId: string): Promise<void> {
     try {
-      const res = await getCustomerReminders(customerId)
-      this.state.reminders = res.reminders
+      const res = await getContactTasks(contactId)
+      this.state.tasks = res.tasks
     } catch (e) {
-      console.error('Failed to load reminders:', e)
+      console.error('Failed to load tasks:', e)
     }
   }
 }

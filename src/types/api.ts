@@ -1,89 +1,101 @@
-// API Response Types for InsurVision Edge Functions
+// ============================================================
+// InsurVision Unified Data Model (CRM-agnostic)
+// Mirrors the backend adapter interface
+// ============================================================
 
-export interface AppointmentCustomer {
-  id: string
-  name: string
-  status: string
-}
-
-export interface Appointment {
+export interface VisionAppointment {
   id: string
   title: string
-  description: string | null
-  due_date: string
-  priority: 'low' | 'medium' | 'high' | 'urgent'
+  start_time: string
+  end_time: string | null
+  location: string | null
+  notes: string | null
+  contact: {
+    id: string
+    name: string
+    company: string | null
+    category: string | null
+  } | null
+}
+
+export interface VisionContactBriefing {
+  contact: {
+    id: string
+    name: string
+    company: string | null
+    email: string | null
+    phone: string | null
+    title: string | null
+    category: string | null
+    since: string | null
+    custom_fields: Record<string, string>
+  }
+  deals: {
+    total: number
+    total_value: number
+    currency: string
+    by_stage: Array<{
+      stage: string
+      count: number
+      value: number
+    }>
+  }
+  open_tasks: number
+  open_tickets: number
+  last_interaction: {
+    date: string
+    type: string
+    summary: string | null
+  } | null
+  insurance?: {
+    annual_premium: number | null
+    annual_commission: number | null
+    contracts_by_category: Array<{
+      category: string
+      count: number
+      premium: number
+    }> | null
+  } | null
+}
+
+export interface VisionDeal {
+  id: string
+  name: string
+  stage: string
+  value: number
+  currency: string
+  close_date: string | null
+  insurer: string | null
+  policy_number: string | null
+  category: string | null
+}
+
+export interface VisionTask {
+  id: string
+  title: string
+  due_date: string | null
+  priority: 'high' | 'medium' | 'low'
   status: string
-  customer: AppointmentCustomer | null
+  notes: string | null
 }
 
 export interface AppointmentsResponse {
-  appointments: Appointment[]
+  appointments: VisionAppointment[]
 }
 
-export interface CustomerInfo {
-  name: string
-  company_name: string | null
-  customer_type: string
-  birth_date: string | null
-  age: number | null
-  phone: string | null
-  email: string | null
-  status: string
-  since: string | null
+export interface DealsResponse {
+  deals: VisionDeal[]
 }
 
-export interface ContractCategory {
-  category: string
-  count: number
-  premium: number
+export interface TasksResponse {
+  tasks: VisionTask[]
 }
 
-export interface ContractsSummary {
-  total: number
-  annual_premium: number
-  by_category: ContractCategory[]
-}
-
-export interface LastInteraction {
-  date: string
-  type: string
-}
-
-export interface CustomerBriefingResponse {
-  customer: CustomerInfo
-  contracts: ContractsSummary
-  open_claims: number
-  open_tasks: number
-  annual_commission: number
-  last_interaction: LastInteraction | null
-}
-
-export interface Contract {
-  id: string
-  contract_number: string
-  product_type: string
-  category: string
-  status: string
-  premium: number
-  payment_frequency: string
-  start_date: string
-  end_date: string | null
-  insurer: string
-}
-
-export interface ContractsResponse {
-  contracts: Contract[]
-}
-
-export interface Reminder {
-  id: string
-  title: string
-  note: string | null
-  due_date: string | null
-  priority: 'low' | 'medium' | 'high' | 'urgent'
-  status: string
-}
-
-export interface RemindersResponse {
-  reminders: Reminder[]
+export interface ProviderInfo {
+  provider: string
+  features: {
+    has_insurance_data: boolean
+    has_commission_data: boolean
+    currency: string
+  }
 }

@@ -1,13 +1,21 @@
 import type {
   AppointmentsResponse,
-  CustomerBriefingResponse,
-  ContractsResponse,
-  RemindersResponse,
+  VisionContactBriefing,
+  DealsResponse,
+  TasksResponse,
+  ProviderInfo,
 } from '../types/api'
 
-const API_URL =
-  import.meta.env.VITE_API_URL ||
-  'https://thejnigrwckubwdhsbwh.supabase.co/functions/v1/insurvision-briefing'
+const DEFAULT_API_URL =
+  'https://thejnigrwckubwdhsbwh.supabase.co/functions/v1/insurvision-api'
+
+function getApiUrl(): string {
+  return (
+    localStorage.getItem('insurvision_api_url') ||
+    import.meta.env.VITE_API_URL ||
+    DEFAULT_API_URL
+  )
+}
 
 function getApiKey(): string {
   return (
@@ -21,7 +29,7 @@ async function fetchApi<T>(
   action: string,
   params: Record<string, string> = {}
 ): Promise<T> {
-  const url = new URL(API_URL)
+  const url = new URL(getApiUrl())
   url.searchParams.set('action', action)
   for (const [k, v] of Object.entries(params)) {
     url.searchParams.set(k, v)
@@ -48,28 +56,32 @@ export async function getNextAppointments(limit = 5) {
   })
 }
 
-export async function getCustomerBriefing(customerId: string) {
-  return fetchApi<CustomerBriefingResponse>('customer-briefing', {
-    customer_id: customerId,
+export async function getContactBriefing(contactId: string) {
+  return fetchApi<VisionContactBriefing>('contact-briefing', {
+    contact_id: contactId,
   })
 }
 
-export async function getCustomerContracts(customerId: string) {
-  return fetchApi<ContractsResponse>('customer-contracts', {
-    customer_id: customerId,
+export async function getContactDeals(contactId: string) {
+  return fetchApi<DealsResponse>('contact-deals', {
+    contact_id: contactId,
   })
 }
 
-export async function getCustomerReminders(customerId: string) {
-  return fetchApi<RemindersResponse>('customer-reminders', {
-    customer_id: customerId,
+export async function getContactTasks(contactId: string) {
+  return fetchApi<TasksResponse>('contact-tasks', {
+    contact_id: contactId,
   })
+}
+
+export async function getProviderInfo() {
+  return fetchApi<ProviderInfo>('provider-info')
 }
 
 /** Test API connection — returns true if key is valid */
 export async function testConnection(): Promise<boolean> {
   try {
-    await getNextAppointments(1)
+    await getProviderInfo()
     return true
   } catch {
     return false

@@ -1,20 +1,18 @@
-import { getNextAppointments } from './api/client'
+import { getNextAppointments, getProviderInfo } from './api/client'
 import { Router } from './navigation/router'
 import { showSplash, showConnected } from './pages/splash'
 import type { EvenAppBridge, TouchEvent, RingEvent } from './types/bridge'
 
 /**
  * Create a bridge instance.
- * In production, this uses @evenrealities/even_hub_sdk's waitForEvenAppBridge.
- * For development, we create a DOM-based simulator.
+ * In production: @evenrealities/even_hub_sdk's waitForEvenAppBridge.
+ * In dev: DOM-based simulator.
  */
 async function getBridge(): Promise<EvenAppBridge> {
   try {
-    // Try to import the real SDK
     const sdk = await import('@evenrealities/even_hub_sdk')
     return await (sdk as any).waitForEvenAppBridge()
   } catch {
-    // Fallback: DOM-based simulator for development
     return createSimulatorBridge()
   }
 }
@@ -28,13 +26,11 @@ function createSimulatorBridge(): EvenAppBridge {
     border-radius: 8px; margin: 40px auto;
   `
 
-  // Add title above display
   const wrapper = document.createElement('div')
   wrapper.style.cssText = 'text-align: center; font-family: sans-serif; color: #888; margin-top: 20px;'
-  wrapper.innerHTML = '<h3 style="color:#aaa">InsurVision G2 Simulator</h3><p style="font-size:12px">← / → Pfeiltasten oder Buttons zum Navigieren</p>'
+  wrapper.innerHTML = '<h3 style="color:#aaa">InsurVision G2 Simulator</h3><p style="font-size:12px">Arrow keys or buttons to navigate</p>'
   app.parentElement!.insertBefore(wrapper, app)
 
-  // Navigation buttons
   const nav = document.createElement('div')
   nav.style.cssText = 'display:flex; justify-content:center; gap:20px; margin-top:12px;'
   const btnLeft = document.createElement('button')
@@ -52,8 +48,6 @@ function createSimulatorBridge(): EvenAppBridge {
 
   btnLeft.addEventListener('click', () => touchCallback?.('tap_left'))
   btnRight.addEventListener('click', () => touchCallback?.('tap_right'))
-
-  // Keyboard navigation
   document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowLeft') touchCallback?.('tap_left')
     if (e.key === 'ArrowRight') touchCallback?.('tap_right')
@@ -70,41 +64,34 @@ function createSimulatorBridge(): EvenAppBridge {
             font-size: ${container.fontSize || 16}px;
             font-weight: ${container.bold ? 'bold' : 'normal'};
             text-align: ${container.alignment || 'left'};
-            margin-bottom: 6px;
-            line-height: 1.3;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            margin-bottom: 6px; line-height: 1.3;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
           `
           app.appendChild(el)
         }
       }
     },
-    onTouchEvent(cb) {
-      touchCallback = cb
-    },
-    onRingEvent(cb) {
-      ringCallback = cb
-    },
+    onTouchEvent(cb) { touchCallback = cb },
+    onRingEvent(cb) { ringCallback = cb },
   }
 }
 
 async function main() {
   const bridge = await getBridge()
-
-  // 1. Show splash
   await showSplash(bridge)
 
   try {
-    // 2. Load appointments
-    const data = await getNextAppointments(10)
+    // Load provider info + appointments in parallel
+    const [providerRes, appointmentsRes] = await Promise.all([
+      getProviderInfo().catch(() => ({ provider: 'unknown', features: { has_insurance_data: false, has_commission_data: false, currency: 'EUR' } })),
+      getNextAppointments(10),
+    ])
 
-    // 3. Show connected
     await showConnected(bridge)
     await new Promise((r) => setTimeout(r, 1500))
 
-    // 4. Start router with appointment list
-    const router = new Router(bridge, data.appointments)
+    // Start router with provider context
+    const router = new Router(bridge, appointmentsRes.appointments, providerRes.provider)
     await router.show()
   } catch (err) {
     console.error('InsurVision init error:', err)
