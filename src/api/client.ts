@@ -62,6 +62,14 @@ export async function getContactBriefing(contactId: string) {
   })
 }
 
+/** Fetch AI-prepared briefing (falls back to live briefing) */
+export async function getPreparedBriefing(contactId: string) {
+  return fetchApi<VisionContactBriefing & { ai_hints?: string; prepared_at?: string }>(
+    'prepared-briefing',
+    { contact_id: contactId }
+  )
+}
+
 export async function getContactDeals(contactId: string) {
   return fetchApi<DealsResponse>('contact-deals', {
     contact_id: contactId,

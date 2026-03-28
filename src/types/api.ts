@@ -96,6 +96,13 @@ export interface ProviderInfo {
   features: {
     has_insurance_data: boolean
     has_commission_data: boolean
+    has_prepared_briefings?: boolean
     currency: string
   }
+}
+
+export interface PreparedBriefing extends VisionContactBriefing {
+  ai_hints?: string
+  context?: string
+  prepared_at?: string
 }
