@@ -30,7 +30,8 @@ function getApiKey(): string {
 
 async function fetchApi<T>(
   action: string,
-  params: Record<string, string> = {}
+  params: Record<string, string> = {},
+  timeoutMs = 8000
 ): Promise<T> {
   const url = new URL(getApiUrl())
   url.searchParams.set('action', action)
@@ -38,19 +39,32 @@ async function fetchApi<T>(
     url.searchParams.set(k, v)
   }
 
-  const response = await fetch(url.toString(), {
-    headers: {
-      'X-Vision-Key': getApiKey(),
-      'Content-Type': 'application/json',
-    },
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-  if (!response.ok) {
-    const text = await response.text()
-    throw new Error(`API ${response.status}: ${text}`)
+  try {
+    const response = await fetch(url.toString(), {
+      headers: {
+        'X-Vision-Key': getApiKey(),
+        'Content-Type': 'application/json',
+      },
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(`API ${response.status}: ${text}`)
+    }
+
+    return await response.json()
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(`API timeout: ${action} (${timeoutMs}ms)`)
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
   }
-
-  return response.json()
 }
 
 export async function getNextAppointments(limit = 5) {

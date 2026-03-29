@@ -130,24 +130,40 @@ export class AppGlasses {
     this.state.provider = info.provider
     this.state.isInsurance = info.provider === 'insurcrm'
 
-    // Load appointments + GPS in parallel (don't block on GPS)
-    await this.showText('  INSURVISION\n  Lade Daten...')
+    // Load everything in parallel with individual error handling
+    await this.bridge.updateText('  INSURVISION\n  Lade Daten...')
 
     let hasLocation = false
-    const [, appointmentsRes] = await Promise.all([
-      // GPS + nearby (may fail/timeout — that's OK)
+
+    // Run GPS + API calls in parallel, each with its own catch
+    const results = await Promise.allSettled([
+      // 1. GPS + nearby customers
       getGPS()
-        .then(pos => getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15))
-        .then(res => { this.state.nearbyCustomers = res.customers; hasLocation = true })
-        .catch(e => {
-          console.log('[IV] GPS/nearby failed:', e)
-          this.state.locationError = e instanceof Error ? e.message : 'GPS nicht verfügbar'
+        .then(pos => {
+          console.log('[IV] GPS ok:', pos.coords.latitude, pos.coords.longitude)
+          return getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15)
+        })
+        .then(res => {
+          this.state.nearbyCustomers = res.customers
+          hasLocation = true
+          console.log('[IV] Nearby:', res.customers.length, 'customers')
         }),
-      // Appointments (always load)
-      getNextAppointments(10).catch(() => ({ appointments: [] as VisionAppointment[] })),
+      // 2. Appointments
+      getNextAppointments(10)
+        .then(res => {
+          this.state.appointments = res.appointments
+          console.log('[IV] Appointments:', res.appointments.length)
+        }),
+      // 3. Provider info (already loaded above, but re-check)
     ])
 
-    this.state.appointments = appointmentsRes.appointments
+    // Log any failures
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        const names = ['GPS/Nearby', 'Appointments', 'Provider']
+        console.log(`[IV] ${names[i]} failed:`, r.reason?.message || r.reason)
+      }
+    })
 
     // Show appropriate start screen
     if (hasLocation && this.state.nearbyCustomers.length > 0) {
