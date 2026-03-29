@@ -9,8 +9,7 @@
  * 4. Hand off to screen router
  */
 import { EvenHubBridge } from 'even-toolkit/bridge'
-import { mapGlassEvent } from 'even-toolkit/action-map'
-import type { GlassNavState, DisplayData } from 'even-toolkit'
+import type { GlassNavState, DisplayData, GlassAction } from 'even-toolkit'
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk'
 
 import { toDisplayData, onGlassAction } from './selectors'
@@ -137,35 +136,29 @@ export class AppGlasses {
       '  Initialisiere...'
     )
 
-    // Register event handler
+    // Register event handler — bypass even-toolkit debounce, map directly
     // G2 OsEventTypeList: CLICK=0, SCROLL_TOP=1, SCROLL_BOTTOM=2, DOUBLE_CLICK=3,
     //   FOREGROUND_ENTER=4, FOREGROUND_EXIT=5, ABNORMAL_EXIT=6, SYSTEM_EXIT=7, IMU=8
     this.bridge.onEvent((event: EvenHubEvent) => {
       const raw = event as any
       const ev = raw?.textEvent ?? raw?.listEvent ?? raw?.sysEvent
-      const et = ev?.eventType
+      if (!ev) return
 
-      console.log('[IV] et:', et)
+      const et = ev.eventType
 
-      // Skip non-input events (foreground/background/exit/IMU)
+      // Skip non-input events
       if (typeof et === 'number' && et >= 4) return
 
-      // Try even-toolkit mapper first (handles debouncing)
-      let action = mapGlassEvent(event)
-
-      // Direct fallback if mapGlassEvent was blocked by debounce
-      if (!action && ev) {
-        if (et === 0 || et === undefined || et === null) {
-          // CLICK_EVENT (0) or undefined (simulator quirk)
-          action = { type: 'SELECT_HIGHLIGHTED' }
-        } else if (et === 1) {
-          action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }
-        } else if (et === 2) {
-          action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }
-        } else if (et === 3) {
-          // DOUBLE_CLICK_EVENT
-          action = { type: 'GO_BACK' }
-        }
+      // Map directly without debounce — the G2 hardware already debounces
+      let action: GlassAction | null = null
+      if (et === 0 || et === undefined || et === null) {
+        action = { type: 'SELECT_HIGHLIGHTED' }
+      } else if (et === 1) {
+        action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }
+      } else if (et === 2) {
+        action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }
+      } else if (et === 3) {
+        action = { type: 'GO_BACK' }
       }
 
       if (action) {
