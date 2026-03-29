@@ -1,24 +1,18 @@
 /**
  * InsurVision G2 Glasses Controller
  *
- * Uses native G2 SDK directly (rebuildPageContainer + ListContainer)
+ * Uses native G2 SDK (rebuildPageContainer + ListContainer)
  * for firmware-managed scroll highlighting on lists.
  *
- * Screens:
- *   nearby   → native list of customers sorted by GPS distance
- *   appointments → native list of upcoming tasks/appointments
- *   briefing → text detail view for a customer
- *   deals    → native list of contracts/deals
- *   comms    → native list of recent communications
- *   tasks    → native list of open tasks/reminders
+ * IMPORTANT: After the first rebuildPageContainer call, NEVER use
+ * even-toolkit's showTextPage/updateText — it will hang because
+ * the even-toolkit page no longer exists.
  */
 import {
   RebuildPageContainer,
   TextContainerProperty,
   ListContainerProperty,
   ListItemContainerProperty,
-  ImageContainerProperty,
-  TextContainerUpgrade,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import type { EvenAppBridge, EvenHubEvent } from '@evenrealities/even_hub_sdk'
@@ -62,19 +56,14 @@ interface State {
   selectedContactId: string | null
 }
 
-/** Request GPS position with hard timeout */
 function getGPS(): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error('No GPS'))
-
     let done = false
-    const hardTimeout = setTimeout(() => {
-      if (!done) { done = true; reject(new Error('GPS timeout (5s)')) }
-    }, 5000)
-
+    const timer = setTimeout(() => { if (!done) { done = true; reject(new Error('GPS timeout')) } }, 5000)
     navigator.geolocation.getCurrentPosition(
-      (pos) => { if (!done) { done = true; clearTimeout(hardTimeout); resolve(pos) } },
-      (err) => { if (!done) { done = true; clearTimeout(hardTimeout); reject(err) } },
+      (pos) => { if (!done) { done = true; clearTimeout(timer); resolve(pos) } },
+      (err) => { if (!done) { done = true; clearTimeout(timer); reject(err) } },
       { enableHighAccuracy: false, timeout: 4000, maximumAge: 600000 }
     )
   })
@@ -84,94 +73,55 @@ export class AppGlasses {
   private bridge: EvenHubBridge
   private raw: EvenAppBridge | null = null
   private state: State
+  private rawReady = false
 
   constructor() {
     this.bridge = new EvenHubBridge()
     this.state = {
-      screen: 'nearby',
-      provider: 'unknown',
-      isInsurance: false,
-      nearbyCustomers: [],
-      appointments: [],
-      briefing: null,
-      deals: [],
-      tasks: [],
-      comms: [],
-      locationError: null,
-      selectedContactId: null,
+      screen: 'nearby', provider: 'unknown', isInsurance: false,
+      nearbyCustomers: [], appointments: [],
+      briefing: null, deals: [], tasks: [], comms: [],
+      locationError: null, selectedContactId: null,
     }
   }
 
   async init(): Promise<void> {
+    // Step 1: Init bridge + show splash via even-toolkit (safe initial render)
     await this.bridge.init()
     this.raw = this.bridge.rawBridge
-
-    // IMPORTANT: Must render an initial page via even-toolkit before using raw bridge
     await this.bridge.setupTextPage()
-    await this.bridge.showTextPage('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Initialisiere...')
+    await this.bridge.showTextPage('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Lade Daten...')
 
-    // Small delay to let firmware settle after initial page
-    await new Promise(r => setTimeout(r, 300))
-
-    // Now show splash via raw bridge (or fallback)
-    try {
-      await this.showText('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Initialisiere...')
-    } catch (e) {
-      console.error('[IV] showText failed, raw bridge may not work:', e)
-    }
-
-    // Register events
+    // Step 2: Register events
     this.bridge.onEvent((event: EvenHubEvent) => this.handleEvent(event))
 
-    // Load provider info
-    const info = await getProviderInfo().catch((): ProviderInfo => ({
-      provider: 'unknown', features: { has_insurance_data: false, has_commission_data: false, currency: 'EUR' },
-    }))
-    this.state.provider = info.provider
-    this.state.isInsurance = info.provider === 'insurcrm'
-
-    // Load everything in parallel with individual error handling
-    await this.bridge.updateText('  INSURVISION\n  Lade Daten...')
-
+    // Step 3: Load all data in parallel (each with own error handling)
     let hasLocation = false
-
-    // Run GPS + API calls in parallel, each with its own catch
     const results = await Promise.allSettled([
-      // 1. GPS + nearby customers
+      getProviderInfo().then(info => {
+        this.state.provider = info.provider
+        this.state.isInsurance = info.provider === 'insurcrm'
+      }),
       getGPS()
-        .then(pos => {
-          console.log('[IV] GPS ok:', pos.coords.latitude, pos.coords.longitude)
-          return getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15)
-        })
-        .then(res => {
-          this.state.nearbyCustomers = res.customers
-          hasLocation = true
-          console.log('[IV] Nearby:', res.customers.length, 'customers')
-        }),
-      // 2. Appointments
+        .then(pos => getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15))
+        .then(res => { this.state.nearbyCustomers = res.customers; hasLocation = true }),
       getNextAppointments(10)
-        .then(res => {
-          this.state.appointments = res.appointments
-          console.log('[IV] Appointments:', res.appointments.length)
-        }),
-      // 3. Provider info (already loaded above, but re-check)
+        .then(res => { this.state.appointments = res.appointments }),
     ])
 
-    // Log any failures
     results.forEach((r, i) => {
       if (r.status === 'rejected') {
-        const names = ['GPS/Nearby', 'Appointments', 'Provider']
-        console.log(`[IV] ${names[i]} failed:`, r.reason?.message || r.reason)
+        console.log('[IV] Init', ['provider', 'GPS/nearby', 'appointments'][i], 'failed:', r.reason?.message || r.reason)
       }
     })
 
-    // Show appropriate start screen
-    if (hasLocation && this.state.nearbyCustomers.length > 0) {
-      this.state.screen = 'nearby'
-    } else {
-      this.state.screen = 'appointments'
-    }
+    // Step 4: Pick start screen
+    this.state.screen = (hasLocation && this.state.nearbyCustomers.length > 0) ? 'nearby' : 'appointments'
 
+    // Step 5: Switch to raw bridge and render
+    // From this point on, ONLY use showText/renderList (raw bridge)
+    // Never call this.bridge.showTextPage/updateText again!
+    this.rawReady = true
     await this.render()
   }
 
@@ -182,31 +132,21 @@ export class AppGlasses {
     const listEv = raw?.listEvent
     const textEv = raw?.textEvent
 
-    // List events have currentSelectItemIndex
     if (listEv) {
       const et = listEv.eventType
-      const selectedIdx = listEv.currentSelectItemIndex
-
-      console.log('[IV] listEvent et:', et, 'idx:', selectedIdx, 'scr:', this.state.screen)
-
-      if (typeof et === 'number' && et >= 4) return // system events
-
+      const idx = listEv.currentSelectItemIndex
+      if (typeof et === 'number' && et >= 4) return
       if (et === OsEventTypeList.CLICK_EVENT || et === undefined || et === null) {
-        this.onListSelect(selectedIdx ?? 0)
+        this.onListSelect(idx ?? 0)
       } else if (et === OsEventTypeList.DOUBLE_CLICK_EVENT) {
         this.onBack()
       }
-      // Scroll is handled by firmware natively for list containers
       return
     }
 
-    // Text events (for detail/briefing screens)
     if (textEv) {
       const et = textEv.eventType
-      console.log('[IV] textEvent et:', et, 'scr:', this.state.screen)
-
       if (typeof et === 'number' && et >= 4) return
-
       if (et === OsEventTypeList.CLICK_EVENT || et === undefined || et === null) {
         this.onTextTap()
       } else if (et === OsEventTypeList.DOUBLE_CLICK_EVENT) {
@@ -217,40 +157,19 @@ export class AppGlasses {
 
   private async onListSelect(itemIndex: number): Promise<void> {
     const s = this.state
-    switch (s.screen) {
-      case 'nearby': {
-        const c = s.nearbyCustomers[itemIndex]
-        if (c?.id) {
-          s.selectedContactId = c.id
-          await this.loadAndShowBriefing(c.id)
-        }
-        break
-      }
-      case 'appointments': {
-        const apt = s.appointments[itemIndex]
-        if (apt?.contact?.id) {
-          s.selectedContactId = apt.contact.id
-          await this.loadAndShowBriefing(apt.contact.id)
-        }
-        break
-      }
-      case 'deals':
-      case 'comms':
-      case 'tasks':
-        // No deeper navigation from these lists — just scroll
-        break
+    if (s.screen === 'nearby') {
+      const c = s.nearbyCustomers[itemIndex]
+      if (c?.id) { s.selectedContactId = c.id; await this.loadAndShowBriefing(c.id) }
+    } else if (s.screen === 'appointments') {
+      const apt = s.appointments[itemIndex]
+      if (apt?.contact?.id) { s.selectedContactId = apt.contact.id; await this.loadAndShowBriefing(apt.contact.id) }
     }
   }
 
   private async onTextTap(): Promise<void> {
-    const s = this.state
-    if (s.screen === 'briefing' && s.selectedContactId) {
-      // Tap on briefing → show deals/contracts
-      try {
-        const res = await getContactDeals(s.selectedContactId)
-        s.deals = res.deals
-      } catch {}
-      s.screen = 'deals'
+    if (this.state.screen === 'briefing' && this.state.selectedContactId) {
+      try { this.state.deals = (await getContactDeals(this.state.selectedContactId)).deals } catch {}
+      this.state.screen = 'deals'
       await this.render()
     }
   }
@@ -258,62 +177,28 @@ export class AppGlasses {
   private async onBack(): Promise<void> {
     const s = this.state
     switch (s.screen) {
-      case 'nearby':
-        s.screen = 'appointments'
-        break
-      case 'appointments':
-        s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'
-        break
-      case 'briefing':
-        s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'
-        break
+      case 'nearby': s.screen = 'appointments'; break
+      case 'appointments': s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'; break
+      case 'briefing': s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'; break
       case 'deals':
-        // Load comms when going from deals
-        if (s.selectedContactId) {
-          try {
-            const res = await getContactCommunications(s.selectedContactId)
-            s.comms = res.communications
-          } catch {}
-        }
-        s.screen = 'comms'
-        break
+        if (s.selectedContactId) { try { s.comms = (await getContactCommunications(s.selectedContactId)).communications } catch {} }
+        s.screen = 'comms'; break
       case 'comms':
-        if (s.selectedContactId) {
-          try {
-            const res = await getContactTasks(s.selectedContactId)
-            s.tasks = res.tasks
-          } catch {}
-        }
-        s.screen = 'tasks'
-        break
-      case 'tasks':
-        s.screen = 'briefing'
-        break
+        if (s.selectedContactId) { try { s.tasks = (await getContactTasks(s.selectedContactId)).tasks } catch {} }
+        s.screen = 'tasks'; break
+      case 'tasks': s.screen = 'briefing'; break
     }
     await this.render()
   }
 
-  // ── Load + Navigate ──
-
   private async loadAndShowBriefing(contactId: string): Promise<void> {
-    this.state.deals = []
-    this.state.tasks = []
-    this.state.comms = []
+    this.state.deals = []; this.state.tasks = []; this.state.comms = []
     this.state.screen = 'briefing'
-
-    // Show loading state
     await this.showText('  Lade Kundendaten...')
-
     try {
-      try {
-        this.state.briefing = await getPreparedBriefing(contactId)
-      } catch {
-        this.state.briefing = await getContactBriefing(contactId)
-      }
-    } catch (e) {
-      console.error('Failed to load briefing:', e)
-    }
-
+      try { this.state.briefing = await getPreparedBriefing(contactId) }
+      catch { this.state.briefing = await getContactBriefing(contactId) }
+    } catch (e) { console.error('[IV] briefing failed:', e) }
     await this.render()
   }
 
@@ -321,29 +206,21 @@ export class AppGlasses {
 
   private async render(): Promise<void> {
     switch (this.state.screen) {
-      case 'nearby': await this.renderList('IN DER NÄHE', this.formatNearbyItems(), 'Tap=Kunde  DblTap=Termine'); break
-      case 'appointments': await this.renderList('TERMINE', this.formatAppointmentItems(), 'Tap=Kunde  DblTap=Nähe'); break
+      case 'nearby': await this.renderList('IN DER NÄHE', this.fmtNearby(), 'Tap=Kunde  DblTap=Termine'); break
+      case 'appointments': await this.renderList('TERMINE', this.fmtAppointments(), 'Tap=Kunde  DblTap=Nähe'); break
       case 'briefing': await this.renderBriefing(); break
-      case 'deals': await this.renderList(this.state.isInsurance ? 'VERTRÄGE' : 'DEALS', this.formatDealItems(), 'DblTap=Kommunikation'); break
-      case 'comms': await this.renderList('KOMMUNIKATION', this.formatCommItems(), 'DblTap=Aufgaben'); break
-      case 'tasks': await this.renderList(this.state.isInsurance ? 'WIEDERVORLAGEN' : 'TASKS', this.formatTaskItems(), 'DblTap=Briefing'); break
+      case 'deals': await this.renderList(this.state.isInsurance ? 'VERTRÄGE' : 'DEALS', this.fmtDeals(), 'DblTap=Kommunikation'); break
+      case 'comms': await this.renderList('KOMMUNIKATION', this.fmtComms(), 'DblTap=Aufgaben'); break
+      case 'tasks': await this.renderList(this.state.isInsurance ? 'WIEDERVORLAGEN' : 'TASKS', this.fmtTasks(), 'DblTap=Briefing'); break
     }
   }
 
-  // ── Native List Page (firmware scroll-highlight!) ──
+  // ── Native List Page ──
 
   private async renderList(title: string, items: string[], footer: string): Promise<void> {
-    if (!this.raw) {
-      // Fallback: render as text via even-toolkit
-      const text = `── ${title} ──\n${items.map((it, i) => `${i + 1}. ${it}`).join('\n')}\n────────────────────────────\n${footer}`
-      await this.bridge.showTextPage(text)
-      return
-    }
-
     const listItems = items.slice(0, 20).map((text, i) =>
       new ListItemContainerProperty({ itemID: i, itemName: truncate(text, 64) } as any)
     )
-
     if (listItems.length === 0) {
       listItems.push(new ListItemContainerProperty({ itemID: 0, itemName: 'Keine Einträge' } as any))
     }
@@ -351,171 +228,120 @@ export class AppGlasses {
     const list = new ListContainerProperty({
       containerID: 2, containerName: 'items',
       xPosition: 0, yPosition: 36, width: 576, height: 228,
-      borderWidth: 0, borderColor: 0, paddingLength: 4,
-      isEventCapture: 1,
+      borderWidth: 0, borderColor: 0, paddingLength: 4, isEventCapture: 1,
     } as any);
     (list as any).listItem = listItems
 
-    await this.raw.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: 3,
-        textObject: [
-          new TextContainerProperty({
-            containerID: 1, containerName: 'header',
-            xPosition: 0, yPosition: 0, width: 576, height: 36,
-            borderWidth: 0, borderColor: 0, paddingLength: 6,
-            content: `── ${title} ──`, isEventCapture: 0,
-          } as any),
-          new TextContainerProperty({
-            containerID: 3, containerName: 'footer',
-            xPosition: 0, yPosition: 264, width: 576, height: 24,
-            borderWidth: 0, borderColor: 0, paddingLength: 4,
-            content: footer, isEventCapture: 0,
-          } as any),
-        ] as any,
-        listObject: [list] as any,
-        imageObject: [] as any,
-      })
-    )
+    try {
+      await this.raw!.rebuildPageContainer(
+        new RebuildPageContainer({
+          containerTotalNum: 3,
+          textObject: [
+            new TextContainerProperty({ containerID: 1, containerName: 'hdr', xPosition: 0, yPosition: 0, width: 576, height: 36, borderWidth: 0, borderColor: 0, paddingLength: 6, content: `── ${title} ──`, isEventCapture: 0 } as any),
+            new TextContainerProperty({ containerID: 3, containerName: 'ftr', xPosition: 0, yPosition: 264, width: 576, height: 24, borderWidth: 0, borderColor: 0, paddingLength: 4, content: footer, isEventCapture: 0 } as any),
+          ] as any,
+          listObject: [list] as any,
+          imageObject: [] as any,
+        })
+      )
+    } catch (e) {
+      console.error('[IV] renderList failed:', e)
+      // Fallback: render as text
+      await this.showText(`── ${title} ──\n${items.join('\n')}\n────────────────────\n${footer}`)
+    }
   }
 
-  // ── Text Detail Page (briefing) ──
+  // ── Text Detail Page ──
 
   private async renderBriefing(): Promise<void> {
     const b = this.state.briefing
-    if (!b) {
-      await this.showText('  Lade Kundendaten...')
-      return
-    }
+    if (!b) return await this.showText('  Lade Kundendaten...')
 
     const c = b.contact
     const isIns = this.state.isInsurance
     const age = c.custom_fields?.birth_date ? formatAge(c.custom_fields.birth_date) : null
+    const L: string[] = []
 
-    // Build formatted briefing text
-    const lines: string[] = []
-    lines.push(`── KUNDE ──`)
-    lines.push(`${c.name.toUpperCase()}${age ? `, ${age}J` : ''}`)
-    if (c.company) lines.push(c.company)
-    if (c.phone) lines.push(`☎ ${c.phone}`)
+    L.push(`── KUNDE ──`)
+    L.push(`${c.name.toUpperCase()}${age ? `, ${age}J` : ''}`)
+    if (c.company) L.push(c.company)
+    if (c.phone) L.push(`☎ ${c.phone}`)
+    L.push('────────────────────────────')
 
-    lines.push('────────────────────────────')
-
-    // Contracts/deals
     const dl = isIns ? 'Verträge' : 'Deals'
-    const vl = isIns ? 'Jahresbeitrag' : 'Volumen'
-    lines.push(`${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} ${vl}`)
+    L.push(`${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} ${isIns ? 'Jahresbeitr.' : 'Volumen'}`)
 
-    // Top categories
     if (b.deals.by_stage.length > 0) {
-      const top = b.deals.by_stage.slice(0, 3)
-        .map(s => `● ${s.stage}: ${s.count}×`)
-        .join('  ')
-      lines.push(top)
+      L.push(b.deals.by_stage.slice(0, 3).map(s => `● ${s.stage}: ${s.count}×`).join('  '))
     }
 
-    // Tasks + tickets
-    const tl = isIns ? 'Wiedervorlagen' : 'Tasks'
-    const tickl = isIns ? 'Schäden' : 'Tickets'
-    lines.push(`${b.open_tasks} ${tl}  ${b.open_tickets} ${tickl}`)
+    L.push(`${b.open_tasks} ${isIns ? 'WV' : 'Tasks'}  ${b.open_tickets} ${isIns ? 'Schäden' : 'Tickets'}`)
 
-    // Commission
-    if (isIns && b.insurance?.annual_commission) {
-      lines.push(`Courtage: ${formatCurrency(b.insurance.annual_commission)}/J`)
-    }
+    if (isIns && b.insurance?.annual_commission) L.push(`Courtage: ${formatCurrency(b.insurance.annual_commission)}/J`)
+    if (b.last_interaction) L.push(`Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
+    if (c.category) L.push(`Status: ${c.category}`)
+    if (c.since) L.push(`Kunde seit ${new Date(c.since).getFullYear()}`)
 
-    // Last interaction
-    if (b.last_interaction) {
-      lines.push(`Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
-    }
+    L.push('────────────────────────────')
+    L.push('Tap ▶ Verträge   DblTap ◀ Zurück')
 
-    // Category badge
-    if (c.category) lines.push(`Status: ${c.category}`)
-    if (c.since) lines.push(`Kunde seit ${new Date(c.since).getFullYear()}`)
-
-    lines.push('────────────────────────────')
-    lines.push('Tap ▶ Verträge   DblTap ◀ Zurück')
-
-    await this.showText(lines.join('\n'))
+    await this.showText(L.join('\n'))
   }
 
-  // ── Format Helpers for List Items ──
+  // ── Format Helpers ──
 
-  private formatNearbyItems(): string[] {
+  private fmtNearby(): string[] {
     return this.state.nearbyCustomers.map(c => {
-      const dist = c.distance_km < 1
-        ? `${Math.round(c.distance_km * 1000)}m`
-        : `${c.distance_km.toFixed(1)}km`
+      const dist = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
       const tasks = c.open_tasks > 0 ? ` !${c.open_tasks}` : ''
-      const premium = c.annual_premium > 0 ? ` ${formatCurrency(c.annual_premium)}` : ''
-      return `${dist} ${c.name}${tasks}${premium}`
+      return `${dist} ${c.name}${tasks}`
     })
   }
 
-  private formatAppointmentItems(): string[] {
-    return this.state.appointments.map(apt => {
-      const time = formatTime(apt.start_time)
-      const name = apt.contact?.name || '–'
-      return `${time} ${name} | ${apt.title}`
-    })
+  private fmtAppointments(): string[] {
+    return this.state.appointments.map(a => `${formatTime(a.start_time)} ${a.contact?.name || '–'} | ${a.title}`)
   }
 
-  private formatDealItems(): string[] {
-    return this.state.deals.map(d => {
-      if (this.state.isInsurance) {
-        return `● ${d.category || d.name} ${d.insurer || ''} ${formatCurrency(d.value)}/J`
-      }
-      return `${d.name} ${formatCurrency(d.value)} [${d.stage}]`
-    })
+  private fmtDeals(): string[] {
+    return this.state.deals.map(d => this.state.isInsurance
+      ? `● ${d.category || d.name} ${d.insurer || ''} ${formatCurrency(d.value)}/J`
+      : `${d.name} ${formatCurrency(d.value)} [${d.stage}]`
+    )
   }
 
-  private formatCommItems(): string[] {
-    const icons: Record<string, string> = {
-      email: '✉', phone: '☎', whatsapp: 'WA', note: '✎', letter: '✉', sms: 'SMS',
-    }
+  private fmtComms(): string[] {
+    const icons: Record<string, string> = { email: '✉', phone: '☎', whatsapp: 'WA', note: '✎', letter: '✉' }
     return this.state.comms.map(c => {
-      const icon = icons[c.type] || '•'
       const dir = c.direction === 'inbound' ? '←' : '→'
-      const date = formatDate(c.date)
-      return `${icon}${dir} ${date} ${c.subject || c.preview || '–'}`
+      return `${icons[c.type] || '•'}${dir} ${formatDate(c.date)} ${c.subject || c.preview || '–'}`
     })
   }
 
-  private formatTaskItems(): string[] {
-    return this.state.tasks.map(t => {
-      const prio = priorityIcon(t.priority)
-      const date = formatDate(t.due_date)
-      return `${date} ${t.title} ${prio}`
-    })
+  private fmtTasks(): string[] {
+    return this.state.tasks.map(t => `${formatDate(t.due_date)} ${t.title} ${priorityIcon(t.priority)}`)
   }
 
-  // ── Low-level helpers ──
+  // ── Low-level: showText via raw bridge ──
 
   private async showText(content: string): Promise<void> {
-    // Always try raw bridge first, fall back to even-toolkit
-    if (this.raw) {
-      try {
-        await this.raw.rebuildPageContainer(
-          new RebuildPageContainer({
-            containerTotalNum: 1,
-            textObject: [
-              new TextContainerProperty({
-                containerID: 1, containerName: 'main',
-                xPosition: 0, yPosition: 0, width: 576, height: 288,
-                borderWidth: 0, borderColor: 0, paddingLength: 8,
-                content, isEventCapture: 1,
-              } as any),
-            ] as any,
-            listObject: [] as any,
-            imageObject: [] as any,
-          })
-        )
-        return
-      } catch (e) {
-        console.error('[IV] rebuildPageContainer failed:', e)
-      }
+    if (!this.rawReady || !this.raw) {
+      // Before raw bridge is ready, use even-toolkit
+      await this.bridge.updateText(content)
+      return
     }
-    // Fallback
-    await this.bridge.showTextPage(content)
+    try {
+      await this.raw.rebuildPageContainer(
+        new RebuildPageContainer({
+          containerTotalNum: 1,
+          textObject: [
+            new TextContainerProperty({ containerID: 1, containerName: 'main', xPosition: 0, yPosition: 0, width: 576, height: 288, borderWidth: 0, borderColor: 0, paddingLength: 8, content, isEventCapture: 1 } as any),
+          ] as any,
+          listObject: [] as any,
+          imageObject: [] as any,
+        })
+      )
+    } catch (e) {
+      console.error('[IV] showText raw failed:', e)
+    }
   }
 }
