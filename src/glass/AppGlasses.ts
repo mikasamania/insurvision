@@ -162,9 +162,20 @@ export class AppGlasses {
       }
 
       if (action) {
-        console.log('[IV]', action.type, 'scr:', this.nav.screen, 'idx:', this.nav.highlightedIndex)
-        this.nav = onGlassAction(action, this.nav, this.snapshot, this.actions)
-        this.render()
+        const prevScreen = this.nav.screen
+        console.log('[IV]', action.type, 'scr:', prevScreen, 'idx:', this.nav.highlightedIndex)
+
+        // Save nav before action — ctx.navigate() may change this.nav as a side effect
+        const returnedNav = onGlassAction(action, this.nav, this.snapshot, this.actions)
+
+        // Only apply returned nav if ctx.navigate() didn't already change the screen
+        // (ctx.navigate sets this.nav directly and calls render)
+        if (this.nav.screen === prevScreen) {
+          // No navigation happened — apply the returned nav state + render
+          this.nav = returnedNav
+          this.render()
+        }
+        // else: ctx.navigate() already handled it, don't overwrite
       }
     })
 
