@@ -1,7 +1,19 @@
 {
+  "package_id": "de.insur360.insurvision",
   "name": "InsurVision",
   "version": "0.1.0",
-  "description": "CRM-Daten auf deiner Even G2 Brille",
+  "edition": "202601",
+  "description": "CRM-Daten auf deiner Even G2 Brille — egal welches CRM du nutzt.",
   "author": "Insur360",
-  "icon": "assets/logo.png"
+  "icon": "assets/logo.png",
+  "entrypoint": "index.html",
+  "min_app_version": "1.0.0",
+  "min_sdk_version": "1.0.0",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Verbindung zu InsurVision API für CRM-Daten (Termine, Kunden, Verträge)"
+    }
+  ],
+  "supported_languages": ["de", "en"]
 }

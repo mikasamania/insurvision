@@ -10,11 +10,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@evenrealities/even_hub_sdk": "latest"
+    "@evenrealities/even_hub_sdk": "latest",
+    "even-toolkit": "^1.4.2"
   },
   "devDependencies": {
-    "@evenrealities/evenhub-simulator": "latest",
     "@evenrealities/evenhub-cli": "latest",
+    "@evenrealities/evenhub-simulator": "latest",
     "typescript": "^5.4.0",
     "vite": "^5.0.0"
   }
