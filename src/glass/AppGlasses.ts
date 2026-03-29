@@ -1,22 +1,20 @@
 /**
  * InsurVision G2 Glasses Controller
  *
- * Uses native G2 SDK (rebuildPageContainer + ListContainer)
- * for firmware-managed scroll highlighting on lists.
- *
- * IMPORTANT: After the first rebuildPageContainer call, NEVER use
- * even-toolkit's showTextPage/updateText — it will hang because
- * the even-toolkit page no longer exists.
+ * Uses the raw Even Hub SDK directly (no even-toolkit wrapper).
+ * Flow: waitForEvenAppBridge → createStartUpPageContainer → rebuildPageContainer
  */
 import {
+  waitForEvenAppBridge,
+  CreateStartUpPageContainer,
   RebuildPageContainer,
   TextContainerProperty,
+  TextContainerUpgrade,
   ListContainerProperty,
   ListItemContainerProperty,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
 import type { EvenAppBridge, EvenHubEvent } from '@evenrealities/even_hub_sdk'
-import { EvenHubBridge } from 'even-toolkit/bridge'
 
 import {
   getNextAppointments,
@@ -52,7 +50,6 @@ interface State {
   deals: VisionDeal[]
   tasks: VisionTask[]
   comms: VisionCommunication[]
-  locationError: string | null
   selectedContactId: string | null
 }
 
@@ -60,44 +57,51 @@ function getGPS(): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error('No GPS'))
     let done = false
-    const timer = setTimeout(() => { if (!done) { done = true; reject(new Error('GPS timeout')) } }, 5000)
+    const t = setTimeout(() => { if (!done) { done = true; reject(new Error('GPS timeout')) } }, 5000)
     navigator.geolocation.getCurrentPosition(
-      (pos) => { if (!done) { done = true; clearTimeout(timer); resolve(pos) } },
-      (err) => { if (!done) { done = true; clearTimeout(timer); reject(err) } },
+      p => { if (!done) { done = true; clearTimeout(t); resolve(p) } },
+      e => { if (!done) { done = true; clearTimeout(t); reject(e) } },
       { enableHighAccuracy: false, timeout: 4000, maximumAge: 600000 }
     )
   })
 }
 
 export class AppGlasses {
-  private bridge: EvenHubBridge
-  private raw: EvenAppBridge | null = null
-  private state: State
-  private rawReady = false
-
-  constructor() {
-    this.bridge = new EvenHubBridge()
-    this.state = {
-      screen: 'nearby', provider: 'unknown', isInsurance: false,
-      nearbyCustomers: [], appointments: [],
-      briefing: null, deals: [], tasks: [], comms: [],
-      locationError: null, selectedContactId: null,
-    }
+  private bridge!: EvenAppBridge
+  private state: State = {
+    screen: 'appointments', provider: 'unknown', isInsurance: false,
+    nearbyCustomers: [], appointments: [],
+    briefing: null, deals: [], tasks: [], comms: [],
+    selectedContactId: null,
   }
 
   async init(): Promise<void> {
-    // Step 1: Init bridge + show splash via even-toolkit (safe initial render)
-    await this.bridge.init()
-    this.raw = this.bridge.rawBridge
-    await this.bridge.setupTextPage()
-    await this.bridge.showTextPage('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Lade Daten...')
+    // 1. Get bridge
+    this.bridge = await waitForEvenAppBridge()
 
-    // Step 2: Register events
-    this.bridge.onEvent((event: EvenHubEvent) => this.handleEvent(event))
+    // 2. MANDATORY: createStartUpPageContainer before anything else
+    await this.bridge.createStartUpPageContainer(
+      new CreateStartUpPageContainer({
+        containerTotalNum: 1,
+        textObject: [
+          new TextContainerProperty({
+            containerID: 1, containerName: 'main',
+            xPosition: 0, yPosition: 0, width: 576, height: 288,
+            borderWidth: 0, borderColor: 0, paddingLength: 8,
+            content: '  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Lade Daten...',
+            isEventCapture: 1,
+          } as any),
+        ] as any,
+        imageObject: [] as any,
+      })
+    )
 
-    // Step 3: Load all data in parallel (each with own error handling)
+    // 3. Register events
+    this.bridge.onEvenHubEvent((event: EvenHubEvent) => this.handleEvent(event))
+
+    // 4. Load data in parallel
     let hasLocation = false
-    const results = await Promise.allSettled([
+    await Promise.allSettled([
       getProviderInfo().then(info => {
         this.state.provider = info.provider
         this.state.isInsurance = info.provider === 'insurcrm'
@@ -109,23 +113,12 @@ export class AppGlasses {
         .then(res => { this.state.appointments = res.appointments }),
     ])
 
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        console.log('[IV] Init', ['provider', 'GPS/nearby', 'appointments'][i], 'failed:', r.reason?.message || r.reason)
-      }
-    })
-
-    // Step 4: Pick start screen
+    // 5. Pick screen + render
     this.state.screen = (hasLocation && this.state.nearbyCustomers.length > 0) ? 'nearby' : 'appointments'
-
-    // Step 5: Switch to raw bridge and render
-    // From this point on, ONLY use showText/renderList (raw bridge)
-    // Never call this.bridge.showTextPage/updateText again!
-    this.rawReady = true
     await this.render()
   }
 
-  // ── Event Handling ──
+  // ── Events ──
 
   private handleEvent(event: EvenHubEvent): void {
     const raw = event as any
@@ -134,10 +127,9 @@ export class AppGlasses {
 
     if (listEv) {
       const et = listEv.eventType
-      const idx = listEv.currentSelectItemIndex
       if (typeof et === 'number' && et >= 4) return
       if (et === OsEventTypeList.CLICK_EVENT || et === undefined || et === null) {
-        this.onListSelect(idx ?? 0)
+        this.onListSelect(listEv.currentSelectItemIndex ?? 0)
       } else if (et === OsEventTypeList.DOUBLE_CLICK_EVENT) {
         this.onBack()
       }
@@ -155,22 +147,20 @@ export class AppGlasses {
     }
   }
 
-  private async onListSelect(itemIndex: number): Promise<void> {
-    const s = this.state
-    if (s.screen === 'nearby') {
-      const c = s.nearbyCustomers[itemIndex]
-      if (c?.id) { s.selectedContactId = c.id; await this.loadAndShowBriefing(c.id) }
-    } else if (s.screen === 'appointments') {
-      const apt = s.appointments[itemIndex]
-      if (apt?.contact?.id) { s.selectedContactId = apt.contact.id; await this.loadAndShowBriefing(apt.contact.id) }
+  private async onListSelect(idx: number): Promise<void> {
+    if (this.state.screen === 'nearby') {
+      const c = this.state.nearbyCustomers[idx]
+      if (c?.id) { this.state.selectedContactId = c.id; await this.loadBriefing(c.id) }
+    } else if (this.state.screen === 'appointments') {
+      const a = this.state.appointments[idx]
+      if (a?.contact?.id) { this.state.selectedContactId = a.contact.id; await this.loadBriefing(a.contact.id) }
     }
   }
 
   private async onTextTap(): Promise<void> {
     if (this.state.screen === 'briefing' && this.state.selectedContactId) {
       try { this.state.deals = (await getContactDeals(this.state.selectedContactId)).deals } catch {}
-      this.state.screen = 'deals'
-      await this.render()
+      this.state.screen = 'deals'; await this.render()
     }
   }
 
@@ -181,24 +171,24 @@ export class AppGlasses {
       case 'appointments': s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'; break
       case 'briefing': s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'; break
       case 'deals':
-        if (s.selectedContactId) { try { s.comms = (await getContactCommunications(s.selectedContactId)).communications } catch {} }
+        if (s.selectedContactId) try { s.comms = (await getContactCommunications(s.selectedContactId)).communications } catch {}
         s.screen = 'comms'; break
       case 'comms':
-        if (s.selectedContactId) { try { s.tasks = (await getContactTasks(s.selectedContactId)).tasks } catch {} }
+        if (s.selectedContactId) try { s.tasks = (await getContactTasks(s.selectedContactId)).tasks } catch {}
         s.screen = 'tasks'; break
       case 'tasks': s.screen = 'briefing'; break
     }
     await this.render()
   }
 
-  private async loadAndShowBriefing(contactId: string): Promise<void> {
+  private async loadBriefing(contactId: string): Promise<void> {
     this.state.deals = []; this.state.tasks = []; this.state.comms = []
     this.state.screen = 'briefing'
     await this.showText('  Lade Kundendaten...')
     try {
       try { this.state.briefing = await getPreparedBriefing(contactId) }
       catch { this.state.briefing = await getContactBriefing(contactId) }
-    } catch (e) { console.error('[IV] briefing failed:', e) }
+    } catch {}
     await this.render()
   }
 
@@ -206,18 +196,18 @@ export class AppGlasses {
 
   private async render(): Promise<void> {
     switch (this.state.screen) {
-      case 'nearby': await this.renderList('IN DER NÄHE', this.fmtNearby(), 'Tap=Kunde  DblTap=Termine'); break
-      case 'appointments': await this.renderList('TERMINE', this.fmtAppointments(), 'Tap=Kunde  DblTap=Nähe'); break
-      case 'briefing': await this.renderBriefing(); break
-      case 'deals': await this.renderList(this.state.isInsurance ? 'VERTRÄGE' : 'DEALS', this.fmtDeals(), 'DblTap=Kommunikation'); break
-      case 'comms': await this.renderList('KOMMUNIKATION', this.fmtComms(), 'DblTap=Aufgaben'); break
-      case 'tasks': await this.renderList(this.state.isInsurance ? 'WIEDERVORLAGEN' : 'TASKS', this.fmtTasks(), 'DblTap=Briefing'); break
+      case 'nearby': await this.showList('IN DER NÄHE', this.fmtNearby(), 'Tap=Kunde  DblTap=Termine'); break
+      case 'appointments': await this.showList('TERMINE', this.fmtAppts(), 'Tap=Kunde  DblTap=Nähe'); break
+      case 'briefing': await this.showBriefing(); break
+      case 'deals': await this.showList(this.state.isInsurance ? 'VERTRÄGE' : 'DEALS', this.fmtDeals(), 'DblTap=Kommunikation'); break
+      case 'comms': await this.showList('KOMMUNIKATION', this.fmtComms(), 'DblTap=Aufgaben'); break
+      case 'tasks': await this.showList(this.state.isInsurance ? 'WIEDERVORLAGEN' : 'TASKS', this.fmtTasks(), 'DblTap=Briefing'); break
     }
   }
 
-  // ── Native List Page ──
+  // ── List Page (header + native list + footer) ──
 
-  private async renderList(title: string, items: string[], footer: string): Promise<void> {
+  private async showList(title: string, items: string[], footer: string): Promise<void> {
     const listItems = items.slice(0, 20).map((text, i) =>
       new ListItemContainerProperty({ itemID: i, itemName: truncate(text, 64) } as any)
     )
@@ -232,28 +222,35 @@ export class AppGlasses {
     } as any);
     (list as any).listItem = listItems
 
-    try {
-      await this.raw!.rebuildPageContainer(
-        new RebuildPageContainer({
-          containerTotalNum: 3,
-          textObject: [
-            new TextContainerProperty({ containerID: 1, containerName: 'hdr', xPosition: 0, yPosition: 0, width: 576, height: 36, borderWidth: 0, borderColor: 0, paddingLength: 6, content: `── ${title} ──`, isEventCapture: 0 } as any),
-            new TextContainerProperty({ containerID: 3, containerName: 'ftr', xPosition: 0, yPosition: 264, width: 576, height: 24, borderWidth: 0, borderColor: 0, paddingLength: 4, content: footer, isEventCapture: 0 } as any),
-          ] as any,
-          listObject: [list] as any,
-          imageObject: [] as any,
-        })
-      )
-    } catch (e) {
-      console.error('[IV] renderList failed:', e)
-      // Fallback: render as text
-      await this.showText(`── ${title} ──\n${items.join('\n')}\n────────────────────\n${footer}`)
-    }
+    await this.bridge.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 3,
+        textObject: [
+          new TextContainerProperty({ containerID: 1, containerName: 'hdr', xPosition: 0, yPosition: 0, width: 576, height: 36, borderWidth: 0, borderColor: 0, paddingLength: 6, content: `── ${title} ──`, isEventCapture: 0 } as any),
+          new TextContainerProperty({ containerID: 3, containerName: 'ftr', xPosition: 0, yPosition: 264, width: 576, height: 24, borderWidth: 0, borderColor: 0, paddingLength: 4, content: footer, isEventCapture: 0 } as any),
+        ] as any,
+        listObject: [list] as any,
+        imageObject: [] as any,
+      })
+    )
   }
 
-  // ── Text Detail Page ──
+  // ── Text Page (briefing detail) ──
 
-  private async renderBriefing(): Promise<void> {
+  private async showText(content: string): Promise<void> {
+    await this.bridge.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 1,
+        textObject: [
+          new TextContainerProperty({ containerID: 1, containerName: 'main', xPosition: 0, yPosition: 0, width: 576, height: 288, borderWidth: 0, borderColor: 0, paddingLength: 8, content, isEventCapture: 1 } as any),
+        ] as any,
+        listObject: [] as any,
+        imageObject: [] as any,
+      })
+    )
+  }
+
+  private async showBriefing(): Promise<void> {
     const b = this.state.briefing
     if (!b) return await this.showText('  Lade Kundendaten...')
 
@@ -267,81 +264,40 @@ export class AppGlasses {
     if (c.company) L.push(c.company)
     if (c.phone) L.push(`☎ ${c.phone}`)
     L.push('────────────────────────────')
-
-    const dl = isIns ? 'Verträge' : 'Deals'
-    L.push(`${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} ${isIns ? 'Jahresbeitr.' : 'Volumen'}`)
-
-    if (b.deals.by_stage.length > 0) {
-      L.push(b.deals.by_stage.slice(0, 3).map(s => `● ${s.stage}: ${s.count}×`).join('  '))
-    }
-
+    L.push(`${b.deals.total} ${isIns ? 'Verträge' : 'Deals'}  ${formatCurrency(b.deals.total_value)} ${isIns ? 'Jahresbeitr.' : 'Volumen'}`)
+    if (b.deals.by_stage.length > 0) L.push(b.deals.by_stage.slice(0, 3).map(s => `● ${s.stage}: ${s.count}×`).join('  '))
     L.push(`${b.open_tasks} ${isIns ? 'WV' : 'Tasks'}  ${b.open_tickets} ${isIns ? 'Schäden' : 'Tickets'}`)
-
     if (isIns && b.insurance?.annual_commission) L.push(`Courtage: ${formatCurrency(b.insurance.annual_commission)}/J`)
     if (b.last_interaction) L.push(`Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
     if (c.category) L.push(`Status: ${c.category}`)
     if (c.since) L.push(`Kunde seit ${new Date(c.since).getFullYear()}`)
-
     L.push('────────────────────────────')
     L.push('Tap ▶ Verträge   DblTap ◀ Zurück')
 
     await this.showText(L.join('\n'))
   }
 
-  // ── Format Helpers ──
+  // ── Formatters ──
 
   private fmtNearby(): string[] {
     return this.state.nearbyCustomers.map(c => {
-      const dist = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
-      const tasks = c.open_tasks > 0 ? ` !${c.open_tasks}` : ''
-      return `${dist} ${c.name}${tasks}`
+      const d = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
+      return `${d} ${c.name}${c.open_tasks > 0 ? ` !${c.open_tasks}` : ''}`
     })
   }
-
-  private fmtAppointments(): string[] {
+  private fmtAppts(): string[] {
     return this.state.appointments.map(a => `${formatTime(a.start_time)} ${a.contact?.name || '–'} | ${a.title}`)
   }
-
   private fmtDeals(): string[] {
     return this.state.deals.map(d => this.state.isInsurance
       ? `● ${d.category || d.name} ${d.insurer || ''} ${formatCurrency(d.value)}/J`
-      : `${d.name} ${formatCurrency(d.value)} [${d.stage}]`
-    )
+      : `${d.name} ${formatCurrency(d.value)} [${d.stage}]`)
   }
-
   private fmtComms(): string[] {
-    const icons: Record<string, string> = { email: '✉', phone: '☎', whatsapp: 'WA', note: '✎', letter: '✉' }
-    return this.state.comms.map(c => {
-      const dir = c.direction === 'inbound' ? '←' : '→'
-      return `${icons[c.type] || '•'}${dir} ${formatDate(c.date)} ${c.subject || c.preview || '–'}`
-    })
+    const ic: Record<string, string> = { email: '✉', phone: '☎', whatsapp: 'WA', note: '✎', letter: '✉' }
+    return this.state.comms.map(c => `${ic[c.type] || '•'}${c.direction === 'inbound' ? '←' : '→'} ${formatDate(c.date)} ${c.subject || c.preview || '–'}`)
   }
-
   private fmtTasks(): string[] {
     return this.state.tasks.map(t => `${formatDate(t.due_date)} ${t.title} ${priorityIcon(t.priority)}`)
-  }
-
-  // ── Low-level: showText via raw bridge ──
-
-  private async showText(content: string): Promise<void> {
-    if (!this.rawReady || !this.raw) {
-      // Before raw bridge is ready, use even-toolkit
-      await this.bridge.updateText(content)
-      return
-    }
-    try {
-      await this.raw.rebuildPageContainer(
-        new RebuildPageContainer({
-          containerTotalNum: 1,
-          textObject: [
-            new TextContainerProperty({ containerID: 1, containerName: 'main', xPosition: 0, yPosition: 0, width: 576, height: 288, borderWidth: 0, borderColor: 0, paddingLength: 8, content, isEventCapture: 1 } as any),
-          ] as any,
-          listObject: [] as any,
-          imageObject: [] as any,
-        })
-      )
-    } catch (e) {
-      console.error('[IV] showText raw failed:', e)
-    }
   }
 }
