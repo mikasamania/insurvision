@@ -121,6 +121,99 @@ export async function getContactCommunications(contactId: string, limit = 10) {
   })
 }
 
+// ── POST helper (for consultation endpoints with body data) ──
+
+async function postApi<T>(
+  action: string,
+  body: Record<string, unknown>,
+  timeoutMs = 15000
+): Promise<T> {
+  const url = new URL(getApiUrl())
+  url.searchParams.set('action', action)
+
+  const fetchPromise = fetch(url.toString(), {
+    method: 'POST',
+    headers: {
+      'X-Vision-Key': getApiKey(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  }).then(async (response) => {
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(`API ${response.status}: ${text}`)
+    }
+    return response.json() as Promise<T>
+  })
+
+  return Promise.race([fetchPromise, timeout<T>(timeoutMs, action)])
+}
+
+// ── Phase 2: Consultation endpoints ──
+
+export interface STTConfig {
+  provider: string
+  apiKey: string
+  language: string
+  model: string
+}
+
+/** Get STT configuration (Deepgram API key etc.) */
+export async function getSTTConfig() {
+  return fetchApi<STTConfig>('get-stt-config')
+}
+
+export interface CoachingResponse {
+  hints: string[]
+  coaching_text: string
+}
+
+/** Get AI coaching hints during a consultation */
+export async function getCoachingHints(contactId: string, transcriptChunk: string) {
+  return postApi<CoachingResponse>('consultation-coaching', {
+    contact_id: contactId,
+    transcript_chunk: transcriptChunk,
+  })
+}
+
+export interface SaveConsultationRequest {
+  contact_id: string
+  transcript: string
+  duration_seconds: number
+  session_id: string
+  process_id?: string
+  process_title?: string
+}
+
+export interface SaveConsultationResponse {
+  ok: boolean
+  process_id: string
+  entry_id: string
+  summary: string
+  topics: string[]
+}
+
+/** Save consultation with transcript, creates process entry + communication */
+export async function saveConsultation(data: SaveConsultationRequest) {
+  return postApi<SaveConsultationResponse>('save-consultation', data as unknown as Record<string, unknown>, 30000)
+}
+
+export interface ProcessListItem {
+  id: string
+  title: string
+  status: string
+  process_type: string
+  updated_at: string
+}
+
+/** List open processes for a customer (for process selection) */
+export async function listProcesses(contactId: string, limit = 5) {
+  return fetchApi<{ processes: ProcessListItem[] }>('list-processes', {
+    contact_id: contactId,
+    limit: String(limit),
+  })
+}
+
 /** Full connection status from API */
 export interface ConnectionStatus {
   provider: string

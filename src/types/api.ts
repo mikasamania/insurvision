@@ -153,3 +153,12 @@ export interface VisionCommunication {
 export interface CommunicationsResponse {
   communications: VisionCommunication[]
 }
+
+// ---- Processes (for consultation save) ----
+export interface ProcessListItem {
+  id: string
+  title: string
+  status: string
+  process_type: string
+  updated_at: string
+}
