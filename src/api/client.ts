@@ -28,6 +28,10 @@ function getApiKey(): string {
   )
 }
 
+function timeout<T>(ms: number, label: string): Promise<T> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout: ${label} (${ms}ms)`)), ms))
+}
+
 async function fetchApi<T>(
   action: string,
   params: Record<string, string> = {},
@@ -39,32 +43,20 @@ async function fetchApi<T>(
     url.searchParams.set(k, v)
   }
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-
-  try {
-    const response = await fetch(url.toString(), {
-      headers: {
-        'X-Vision-Key': getApiKey(),
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-    })
-
+  const fetchPromise = fetch(url.toString(), {
+    headers: {
+      'X-Vision-Key': getApiKey(),
+      'Content-Type': 'application/json',
+    },
+  }).then(async (response) => {
     if (!response.ok) {
       const text = await response.text()
       throw new Error(`API ${response.status}: ${text}`)
     }
+    return response.json() as Promise<T>
+  })
 
-    return await response.json()
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error(`API timeout: ${action} (${timeoutMs}ms)`)
-    }
-    throw e
-  } finally {
-    clearTimeout(timer)
-  }
+  return Promise.race([fetchPromise, timeout<T>(timeoutMs, action)])
 }
 
 export async function getNextAppointments(limit = 5) {
