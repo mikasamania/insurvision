@@ -137,32 +137,31 @@ export class AppGlasses {
       '  Initialisiere...'
     )
 
-    // Register event handler — use both mapGlassEvent and raw fallback
+    // Register event handler
     this.bridge.onEvent((event: EvenHubEvent) => {
-      console.log('[InsurVision] raw event:', JSON.stringify(event))
+      // Extract the actual event payload (SDK wraps in textEvent/listEvent/sysEvent)
+      const raw = event as any
+      const ev = raw?.textEvent ?? raw?.listEvent ?? raw?.sysEvent
+      const et = ev?.eventType
 
-      // Try even-toolkit's gesture-aware mapper first
+      console.log('[IV] eventType:', et, 'full:', JSON.stringify(event).slice(0, 200))
+
+      // Map G2 event types to glass actions
+      // OsEventTypeList: CLICK=0, SCROLL_TOP=1, SCROLL_BOTTOM=2, DOUBLE_CLICK=4
       let action = mapGlassEvent(event)
 
-      // Fallback: if mapGlassEvent didn't recognize it, try raw event parsing
-      // The G2 text mode sometimes sends events differently
-      if (!action) {
-        const ev = (event as any)?.textEvent ?? (event as any)?.listEvent ?? (event as any)?.sysEvent ?? event
-        const et = ev?.eventType
-        // OsEventTypeList: CLICK=0, DOUBLE_CLICK=4, SCROLL_TOP=1, SCROLL_BOTTOM=2
-        if (et === 0 || et === undefined || et === null) {
-          action = { type: 'SELECT_HIGHLIGHTED' }
-        } else if (et === 4) {
-          action = { type: 'GO_BACK' }
-        } else if (et === 1) {
-          action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }
-        } else if (et === 2) {
-          action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }
+      // Only use fallback for explicit known event types (NOT undefined/null)
+      if (!action && ev && typeof et === 'number') {
+        switch (et) {
+          case 0: action = { type: 'SELECT_HIGHLIGHTED' }; break
+          case 1: action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }; break
+          case 2: action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }; break
+          case 4: action = { type: 'GO_BACK' }; break
         }
       }
 
       if (action) {
-        console.log('[InsurVision] mapped action:', action.type)
+        console.log('[IV] action:', action.type, 'screen:', this.nav.screen, 'idx:', this.nav.highlightedIndex)
         this.nav = onGlassAction(action, this.nav, this.snapshot, this.actions)
         this.render()
       }

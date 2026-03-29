@@ -65,12 +65,14 @@ export const nearbyScreen: GlassScreen<Snapshot, Actions> = {
           ),
         }
       case 'SELECT_HIGHLIGHTED': {
-        const customer = snapshot.nearbyCustomers[nav.highlightedIndex]
+        const idx = nav.highlightedIndex
+        const customer = snapshot.nearbyCustomers[idx]
+        console.log('[IV] nearby SELECT idx:', idx, 'customer:', customer?.name, 'id:', customer?.id)
         if (customer?.id) {
           ctx.loadBriefing(customer.id)
           ctx.navigate('briefing')
         }
-        return { ...nav, highlightedIndex: 0 }
+        return nav  // Don't reset index — keep position for when user comes back
       }
       case 'GO_BACK':
         // Switch to appointments view
