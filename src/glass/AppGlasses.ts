@@ -90,11 +90,21 @@ export class AppGlasses {
     // 2. Show loading text
     await this.bridge.showTextPage('INSURVISION\n\nVerbinde...')
 
-    // 3. Register events using even-toolkit's battle-tested mapper
+    // 3. Register events — use BOTH paths for reliability
+    // Path A: even-toolkit's addEventListener
     this.bridge.onEvent((event) => {
       const action = mapGlassEvent(event)
       if (action) this.handleAction(action)
     })
+    // Path B: raw bridge onEvenHubEvent as fallback
+    const raw = this.bridge.rawBridge
+    if (raw) {
+      raw.onEvenHubEvent((event: any) => {
+        // mapGlassEvent handles textEvent/listEvent/sysEvent extraction
+        const action = mapGlassEvent(event)
+        if (action) this.handleAction(action)
+      })
+    }
 
     // 4. Load data
     await this.bridge.updateText('INSURVISION\n\nLade Daten...')
@@ -128,7 +138,14 @@ export class AppGlasses {
         this.onSelect()
         break
       case 'HIGHLIGHT_MOVE':
-        this.onMove(action.direction === 'down' ? 1 : -1)
+        // On list screens: move cursor
+        // On detail screens (briefing): swipe switches to next/prev screen
+        if (this.state.screen === 'briefing') {
+          if (action.direction === 'down') this.onNextScreen()
+          else this.onPrevScreen()
+        } else {
+          this.onMove(action.direction === 'down' ? 1 : -1)
+        }
         break
       case 'GO_BACK':
         this.onBack()
@@ -144,6 +161,44 @@ export class AppGlasses {
       this.state.cursor = newCursor
       this.render()
     }
+  }
+
+  /** Swipe forward on detail screens = next tab */
+  private async onNextScreen(): Promise<void> {
+    if (this.busy) return
+    this.busy = true
+    const s = this.state
+    const cid = s.selectedContactId
+    try {
+      switch (s.screen) {
+        case 'briefing':
+          if (cid) { try { s.deals = (await getContactDeals(cid)).deals } catch {} }
+          s.screen = 'deals'; s.cursor = 0; break
+        case 'deals':
+          if (cid) { try { s.comms = (await getContactCommunications(cid)).communications } catch {} }
+          s.screen = 'comms'; s.cursor = 0; break
+        case 'comms':
+          if (cid) { try { s.tasks = (await getContactTasks(cid)).tasks } catch {} }
+          s.screen = 'tasks'; s.cursor = 0; break
+        case 'tasks':
+          s.screen = 'briefing'; s.cursor = 0; break
+      }
+      await this.render()
+    } finally { this.busy = false }
+  }
+
+  /** Swipe back on detail screens = prev tab */
+  private async onPrevScreen(): Promise<void> {
+    if (this.busy) return
+    const s = this.state
+    switch (s.screen) {
+      case 'briefing': break // already at start
+      case 'deals': s.screen = 'briefing'; break
+      case 'comms': s.screen = 'deals'; break
+      case 'tasks': s.screen = 'comms'; break
+    }
+    s.cursor = 0
+    await this.render()
   }
 
   private getListLength(): number {
@@ -174,34 +229,14 @@ export class AppGlasses {
           if (a?.contact?.id) { s.selectedContactId = a.contact.id; await this.loadBriefing(a.contact.id) }
           break
         }
-        case 'briefing': {
-          if (s.selectedContactId) {
-            await this.bridge.updateText('Lade Verträge...')
-            try { s.deals = (await getContactDeals(s.selectedContactId)).deals } catch {}
-            s.screen = 'deals'; s.cursor = 0; await this.render()
-          }
-          break
-        }
-        case 'deals': {
-          if (s.selectedContactId) {
-            await this.bridge.updateText('Lade Kommunikation...')
-            try { s.comms = (await getContactCommunications(s.selectedContactId)).communications } catch {}
-            s.screen = 'comms'; s.cursor = 0; await this.render()
-          }
-          break
-        }
-        case 'comms': {
-          if (s.selectedContactId) {
-            await this.bridge.updateText('Lade Aufgaben...')
-            try { s.tasks = (await getContactTasks(s.selectedContactId)).tasks } catch {}
-            s.screen = 'tasks'; s.cursor = 0; await this.render()
-          }
-          break
-        }
-        case 'tasks': {
-          s.screen = 'briefing'; s.cursor = 0; await this.render()
-          break
-        }
+        // On detail/list screens: tap = next screen
+        case 'briefing':
+        case 'deals':
+        case 'comms':
+        case 'tasks':
+          await this.onNextScreen()
+          return // onNextScreen handles busy flag
+
       }
     } finally {
       this.busy = false
