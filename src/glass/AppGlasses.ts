@@ -137,10 +137,32 @@ export class AppGlasses {
       '  Initialisiere...'
     )
 
-    // Register event handler
+    // Register event handler — use both mapGlassEvent and raw fallback
     this.bridge.onEvent((event: EvenHubEvent) => {
-      const action = mapGlassEvent(event)
+      console.log('[InsurVision] raw event:', JSON.stringify(event))
+
+      // Try even-toolkit's gesture-aware mapper first
+      let action = mapGlassEvent(event)
+
+      // Fallback: if mapGlassEvent didn't recognize it, try raw event parsing
+      // The G2 text mode sometimes sends events differently
+      if (!action) {
+        const ev = (event as any)?.textEvent ?? (event as any)?.listEvent ?? (event as any)?.sysEvent ?? event
+        const et = ev?.eventType
+        // OsEventTypeList: CLICK=0, DOUBLE_CLICK=4, SCROLL_TOP=1, SCROLL_BOTTOM=2
+        if (et === 0 || et === undefined || et === null) {
+          action = { type: 'SELECT_HIGHLIGHTED' }
+        } else if (et === 4) {
+          action = { type: 'GO_BACK' }
+        } else if (et === 1) {
+          action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }
+        } else if (et === 2) {
+          action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }
+        }
+      }
+
       if (action) {
+        console.log('[InsurVision] mapped action:', action.type)
         this.nav = onGlassAction(action, this.nav, this.snapshot, this.actions)
         this.render()
       }
