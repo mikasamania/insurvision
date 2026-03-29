@@ -55,7 +55,7 @@ export const tasksScreen: GlassScreen<Snapshot, Actions> = {
       case 'SELECT_HIGHLIGHTED':
         return nav // No deeper navigation
       case 'GO_BACK':
-        ctx.navigate('deals')
+        ctx.navigate('comms')
         return { ...nav, highlightedIndex: 0 }
     }
   },

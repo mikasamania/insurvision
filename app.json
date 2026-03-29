@@ -13,6 +13,10 @@
     {
       "name": "network",
       "desc": "Verbindung zu InsurVision API für CRM-Daten (Termine, Kunden, Verträge)"
+    },
+    {
+      "name": "location",
+      "desc": "Standort ermitteln um Kunden in der Nähe anzuzeigen"
     }
   ],
   "supported_languages": ["de", "en"]

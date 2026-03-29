@@ -1,48 +1,53 @@
 /**
- * Deals/Contracts list screen.
- * Tap = go to tasks. Double-tap = back to briefing.
+ * Communications history screen for a customer.
+ * Shows recent emails, calls, WhatsApp, notes.
+ * Tap = no-op. Double-tap = back to briefing.
  */
 import type { GlassScreen } from 'even-toolkit/glass-screen-router'
 import { buildScrollableList } from 'even-toolkit/glass-display-builders'
 import { moveHighlight } from 'even-toolkit/glass-nav'
 import { glassHeader, line } from 'even-toolkit'
 import type { Snapshot, Actions } from '../shared'
-import { formatCurrency } from '../../utils/formatter'
+import { formatDate } from '../../utils/formatter'
 import { truncate } from '../../utils/truncate'
 
 const MAX_VISIBLE = 6
 
-export const dealsScreen: GlassScreen<Snapshot, Actions> = {
-  display(snapshot, nav) {
-    const isIns = snapshot.isInsurance
-    const label = isIns ? 'VERTRÄGE' : 'DEALS'
-    const lines = [...glassHeader(label)]
+const TYPE_ICONS: Record<string, string> = {
+  email: '✉',
+  phone: '☎',
+  whatsapp: 'WA',
+  note: '✎',
+  letter: '✉',
+  sms: 'SMS',
+}
 
-    if (snapshot.deals.length === 0) {
-      lines.push(line(isIns ? 'Keine Verträge' : 'Keine Deals', 'meta'))
+export const commsScreen: GlassScreen<Snapshot, Actions> = {
+  display(snapshot, nav) {
+    const lines = [...glassHeader('KOMMUNIKATION')]
+    const comms = snapshot.communications
+
+    if (comms.length === 0) {
+      lines.push(line('Keine Kommunikation', 'meta'))
       lines.push(line('DblTap=Zurück', 'meta'))
       return { lines }
     }
 
     const listLines = buildScrollableList({
-      items: snapshot.deals,
+      items: comms,
       highlightedIndex: nav.highlightedIndex,
       maxVisible: MAX_VISIBLE,
-      formatter: (d) => {
-        if (isIns) {
-          // "KFZ Allianz | 650 €/J"
-          return truncate(
-            `${d.category || d.name} ${d.insurer || ''} | ${formatCurrency(d.value)}/J`,
-            44
-          )
-        }
-        // "Deal Name | 12.500 € [Won]"
-        return truncate(`${d.name} | ${formatCurrency(d.value)} [${d.stage}]`, 44)
+      formatter: (c) => {
+        const icon = TYPE_ICONS[c.type] || '•'
+        const dir = c.direction === 'inbound' ? '←' : '→'
+        const date = formatDate(c.date)
+        const subj = c.subject || c.preview || '–'
+        return truncate(`${icon}${dir} ${date} ${subj}`, 44)
       },
     })
 
     lines.push(...listLines)
-    lines.push(line('Tap▸Komm.  DblTap◂Zurück', 'meta'))
+    lines.push(line('DblTap=Zurück', 'meta'))
 
     return { lines }
   },
@@ -55,19 +60,19 @@ export const dealsScreen: GlassScreen<Snapshot, Actions> = {
           highlightedIndex: moveHighlight(
             nav.highlightedIndex,
             action.direction,
-            Math.max(0, snapshot.deals.length - 1)
+            Math.max(0, snapshot.communications.length - 1)
           ),
         }
       case 'SELECT_HIGHLIGHTED': {
         const contactId = snapshot.briefing?.contact?.id
         if (contactId) {
-          ctx.loadCommunications(contactId)
-          ctx.navigate('comms')
+          ctx.loadTasks(contactId)
+          ctx.navigate('tasks')
         }
         return { ...nav, highlightedIndex: 0 }
       }
       case 'GO_BACK':
-        ctx.navigate('briefing')
+        ctx.navigate('deals')
         return { ...nav, highlightedIndex: 0 }
     }
   },

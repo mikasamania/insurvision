@@ -106,3 +106,50 @@ export interface PreparedBriefing extends VisionContactBriefing {
   context?: string
   prepared_at?: string
 }
+
+// ---- Nearby Customers (geo-based) ----
+export interface NearbyCustomer {
+  id: string
+  name: string
+  company: string | null
+  city: string | null
+  street: string | null
+  distance_km: number
+  category: string | null
+  contracts_count: number
+  annual_premium: number
+  last_interaction: string | null
+  open_tasks: number
+}
+
+export interface NearbyCustomersResponse {
+  customers: NearbyCustomer[]
+  location: { lat: number; lng: number }
+}
+
+// ---- Customer Search ----
+export interface CustomerSearchResult {
+  id: string
+  name: string
+  company: string | null
+  city: string | null
+  category: string | null
+}
+
+export interface CustomerSearchResponse {
+  results: CustomerSearchResult[]
+}
+
+// ---- Communications ----
+export interface VisionCommunication {
+  id: string
+  type: string        // email, phone, whatsapp, note, letter
+  direction: string   // inbound, outbound
+  subject: string | null
+  date: string
+  preview: string | null
+}
+
+export interface CommunicationsResponse {
+  communications: VisionCommunication[]
+}

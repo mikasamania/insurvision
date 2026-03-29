@@ -4,6 +4,9 @@ import type {
   DealsResponse,
   TasksResponse,
   ProviderInfo,
+  NearbyCustomersResponse,
+  CustomerSearchResponse,
+  CommunicationsResponse,
 } from '../types/api'
 
 const DEFAULT_API_URL =
@@ -84,6 +87,32 @@ export async function getContactTasks(contactId: string) {
 
 export async function getProviderInfo() {
   return fetchApi<ProviderInfo>('provider-info')
+}
+
+/** Nearby customers based on GPS coordinates */
+export async function getNearbyCustomers(lat: number, lng: number, radiusKm = 25, limit = 15) {
+  return fetchApi<NearbyCustomersResponse>('nearby-customers', {
+    lat: String(lat),
+    lng: String(lng),
+    radius_km: String(radiusKm),
+    limit: String(limit),
+  })
+}
+
+/** Search customers by name */
+export async function searchCustomers(query: string, limit = 10) {
+  return fetchApi<CustomerSearchResponse>('search-customers', {
+    q: query,
+    limit: String(limit),
+  })
+}
+
+/** Customer communications history */
+export async function getContactCommunications(contactId: string, limit = 10) {
+  return fetchApi<CommunicationsResponse>('contact-communications', {
+    contact_id: contactId,
+    limit: String(limit),
+  })
 }
 
 /** Full connection status from API */

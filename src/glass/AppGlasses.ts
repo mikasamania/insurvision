@@ -1,6 +1,12 @@
 /**
  * Main glasses controller — connects EvenHubBridge with screen router.
  * Manages snapshot state, renders display lines, and handles events.
+ *
+ * Boot sequence:
+ * 1. Init bridge + show splash
+ * 2. Request GPS location
+ * 3. Load nearby customers (if GPS available) OR fall back to appointments
+ * 4. Hand off to screen router
  */
 import { EvenHubBridge } from 'even-toolkit/bridge'
 import { mapGlassEvent } from 'even-toolkit/action-map'
@@ -15,8 +21,10 @@ import {
   getContactBriefing,
   getContactDeals,
   getContactTasks,
+  getContactCommunications,
   getProviderInfo,
   getPreparedBriefing,
+  getNearbyCustomers,
 } from '../api/client'
 
 function renderLinesToText(display: DisplayData): string {
@@ -29,25 +37,46 @@ function renderLinesToText(display: DisplayData): string {
     .join('\n')
 }
 
+/** Request GPS position from the phone */
+function getCurrentPosition(): Promise<GeolocationPosition> {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error('Geolocation not supported'))
+      return
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 300000, // Cache for 5 minutes
+    })
+  })
+}
+
 export class AppGlasses {
   private bridge: EvenHubBridge
   private snapshot: Snapshot
   private nav: GlassNavState
   private actions: Actions
+  private currentContactId: string | null = null
 
   constructor() {
     this.bridge = new EvenHubBridge()
     this.snapshot = createEmptySnapshot()
-    this.nav = { highlightedIndex: 0, screen: 'home' }
+    this.nav = { highlightedIndex: 0, screen: 'nearby' }
 
     this.actions = {
       navigate: (screen: string) => {
         this.nav = { ...this.nav, screen, highlightedIndex: 0 }
         this.render()
       },
+
       loadBriefing: async (contactId: string) => {
+        this.currentContactId = contactId
+        // Clear previous customer data
+        this.snapshot.deals = []
+        this.snapshot.tasks = []
+        this.snapshot.communications = []
         try {
-          // Try prepared briefing first, fall back to live
           try {
             this.snapshot.briefing = await getPreparedBriefing(contactId)
           } catch {
@@ -58,6 +87,7 @@ export class AppGlasses {
         }
         this.render()
       },
+
       loadDeals: async (contactId: string) => {
         try {
           const res = await getContactDeals(contactId)
@@ -67,6 +97,7 @@ export class AppGlasses {
         }
         this.render()
       },
+
       loadTasks: async (contactId: string) => {
         try {
           const res = await getContactTasks(contactId)
@@ -76,20 +107,34 @@ export class AppGlasses {
         }
         this.render()
       },
+
+      loadCommunications: async (contactId: string) => {
+        try {
+          const res = await getContactCommunications(contactId)
+          this.snapshot.communications = res.communications
+        } catch (e) {
+          console.error('Failed to load comms:', e)
+        }
+        this.render()
+      },
+
+      refreshNearby: async () => {
+        await this.loadNearbyCustomers()
+        this.render()
+      },
     }
   }
 
   async init(): Promise<void> {
-    // Initialize bridge
     await this.bridge.init()
     await this.bridge.setupTextPage()
 
-    // Show loading state
+    // Splash
     await this.bridge.showTextPage(
       '  INSURVISION\n' +
       '  Smart Glasses CRM\n' +
       '────────────────────────────\n' +
-      '  Lade Termine...'
+      '  Initialisiere...'
     )
 
     // Register event handler
@@ -101,36 +146,67 @@ export class AppGlasses {
       }
     })
 
-    // Load initial data
+    // Load provider info
+    const providerRes = await getProviderInfo().catch(() => ({
+      provider: 'unknown',
+      features: { has_insurance_data: false, has_commission_data: false, currency: 'EUR' },
+    }))
+    this.snapshot.provider = providerRes.provider
+    this.snapshot.isInsurance = providerRes.provider === 'insurcrm'
+
+    // Try GPS → nearby customers (primary), fall back to appointments
+    await this.bridge.updateText(
+      '  INSURVISION\n' +
+      '  Smart Glasses CRM\n' +
+      '────────────────────────────\n' +
+      '  Standort wird ermittelt...'
+    )
+
+    const hasLocation = await this.loadNearbyCustomers()
+
+    // Also load appointments in parallel
     try {
-      const [providerRes, appointmentsRes] = await Promise.all([
-        getProviderInfo().catch(() => ({
-          provider: 'unknown',
-          features: { has_insurance_data: false, has_commission_data: false, currency: 'EUR' },
-        })),
-        getNextAppointments(10),
-      ])
+      const aptRes = await getNextAppointments(10)
+      this.snapshot.appointments = aptRes.appointments
+    } catch (e) {
+      console.error('Failed to load appointments:', e)
+    }
 
-      this.snapshot.provider = providerRes.provider
-      this.snapshot.isInsurance = providerRes.provider === 'insurcrm'
-      this.snapshot.appointments = appointmentsRes.appointments
-      this.snapshot.loading = false
+    this.snapshot.loading = false
 
-      // Brief connected confirmation
-      await this.bridge.showTextPage(
-        '  INSURVISION\n' +
-        '  Verbunden ✓\n' +
-        `  ${providerRes.provider.toUpperCase()}\n` +
-        `  ${appointmentsRes.appointments.length} Termine geladen`
-      )
+    // Start on the right screen
+    if (hasLocation && this.snapshot.nearbyCustomers.length > 0) {
+      this.nav.screen = 'nearby'
+    } else {
+      this.nav.screen = 'appointments'
+    }
 
-      await new Promise((r) => setTimeout(r, 1500))
-      this.render()
-    } catch (err) {
-      this.snapshot.loading = false
-      this.snapshot.error =
-        err instanceof Error ? err.message : 'Verbindung fehlgeschlagen'
-      this.render()
+    // Brief connected confirmation
+    const count = this.snapshot.nearbyCustomers.length || this.snapshot.appointments.length
+    await this.bridge.updateText(
+      '  INSURVISION ✓\n' +
+      `  ${providerRes.provider.toUpperCase()}\n` +
+      `  ${count} Einträge geladen\n` +
+      `  ${this.nav.screen === 'nearby' ? 'Kunden in der Nähe' : 'Termine'}`
+    )
+
+    await new Promise((r) => setTimeout(r, 1200))
+    this.render()
+  }
+
+  private async loadNearbyCustomers(): Promise<boolean> {
+    try {
+      const pos = await getCurrentPosition()
+      const { latitude, longitude } = pos.coords
+
+      const res = await getNearbyCustomers(latitude, longitude, 25, 15)
+      this.snapshot.nearbyCustomers = res.customers
+      this.snapshot.locationError = null
+      return true
+    } catch (e) {
+      console.log('Location unavailable:', e)
+      this.snapshot.locationError = e instanceof Error ? e.message : 'Standort nicht verfügbar'
+      return false
     }
   }
 
