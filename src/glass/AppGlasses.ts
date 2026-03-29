@@ -1,20 +1,25 @@
 /**
  * InsurVision G2 Glasses Controller
  *
- * Uses ONE text container created via createStartUpPageContainer.
- * All updates via textContainerUpgrade (flicker-free).
- * No rebuildPageContainer — that hangs on real devices.
+ * CRITICAL RULES for G2 Display (576x288px, ~10 text lines):
+ * 1. createStartUpPageContainer ONCE at init
+ * 2. textContainerUpgrade for ALL updates (flicker-free)
+ * 3. NEVER exceed 10 lines — if text overflows, firmware hijacks
+ *    scroll events for internal scrolling and our cursor breaks.
+ * 4. SCROLL_TOP/BOTTOM = swipe events, used for cursor movement
+ *    ONLY when content fits on screen (no overflow).
  *
- * Layout inspired by the InsurCRM HUD mockup:
- * ╭──────────────────────────────────────╮
- * │ INSUR//CRM v1.0    G2 ● CONNECTED   │  ← Header
- * │ ──── KUNDE ────                      │  ← Section
- * │ MÜLLER, THOMAS                       │  ← Content
- * │ ● 14.03.1985 (41) ● Stuttgart       │
- * │ ...                                  │
- * │ ──── ─── ●●○○○ ─── ────             │  ← Page dots
- * │ Tap ▶ Weiter   DblTap ◀ Zurück      │  ← Nav hint
- * ╰──────────────────────────────────────╯
+ * Layout (exactly 10 lines):
+ * Line 1: INSURVISION         G2 ● CONN
+ * Line 2: ──── SECTION ────
+ * Line 3: ▶ Item 1 (highlighted)
+ * Line 4:   Item 2
+ * Line 5:   Item 3
+ * Line 6:   Item 4
+ * Line 7:   Item 5
+ * Line 8: ────────────────────
+ * Line 9: [NÄHE] TERMINE  KUNDE
+ * Line 10: Swipe↕  Tap▶  DblTap◀
  */
 import {
   waitForEvenAppBridge,
@@ -229,7 +234,7 @@ export class AppGlasses {
       case 'briefing': {
         // Tap on briefing → load deals
         if (s.selectedContactId) {
-          await this.updateText(this.header('VERTRÄGE') + '\n\n  Lade...')
+          await this.updateText('── VERTRÄGE ──' + '\n\n  Lade...')
           try { s.deals = (await getContactDeals(s.selectedContactId)).deals } catch {}
           s.screen = 'deals'; s.cursor = 0; await this.render()
         }
@@ -238,7 +243,7 @@ export class AppGlasses {
       case 'deals': {
         // Tap on deals → load comms
         if (s.selectedContactId) {
-          await this.updateText(this.header('KOMMUNIKATION') + '\n\n  Lade...')
+          await this.updateText('── KOMMUNIKATION ──' + '\n\n  Lade...')
           try { s.comms = (await getContactCommunications(s.selectedContactId)).communications } catch {}
           s.screen = 'comms'; s.cursor = 0; await this.render()
         }
@@ -247,7 +252,7 @@ export class AppGlasses {
       case 'comms': {
         // Tap on comms → load tasks
         if (s.selectedContactId) {
-          await this.updateText(this.header('AUFGABEN') + '\n\n  Lade...')
+          await this.updateText('── AUFGABEN ──' + '\n\n  Lade...')
           try { s.tasks = (await getContactTasks(s.selectedContactId)).tasks } catch {}
           s.screen = 'tasks'; s.cursor = 0; await this.render()
         }
@@ -279,7 +284,7 @@ export class AppGlasses {
     this.state.deals = []; this.state.tasks = []; this.state.comms = []
     this.state.screen = 'briefing'
     this.state.cursor = 0
-    await this.updateText(this.header('KUNDE') + '\n\n  Lade Kundendaten...')
+    await this.updateText('── KUNDE ──' + '\n\n  Lade Kundendaten...')
     try {
       try { this.state.briefing = await getPreparedBriefing(contactId) }
       catch { this.state.briefing = await getContactBriefing(contactId) }
@@ -290,226 +295,173 @@ export class AppGlasses {
   }
 
   // ── Render ──
+  // CRITICAL: Every render must produce EXACTLY 10 lines.
+  // If text overflows, firmware hijacks scroll events!
+  // Layout: 2 header + 5 content + 1 separator + 1 tabs + 1 nav = 10
 
   private async render(): Promise<void> {
     let text: string
     switch (this.state.screen) {
-      case 'nearby':      text = this.renderNearby(); break
-      case 'appointments': text = this.renderAppointments(); break
-      case 'briefing':    text = this.renderBriefing(); break
-      case 'deals':       text = this.renderDeals(); break
-      case 'comms':       text = this.renderComms(); break
-      case 'tasks':       text = this.renderTasks(); break
-      default:            text = 'INSURVISION'; break
+      case 'nearby':       text = this.renderList('IN DER NÄHE', this.fmtNearby()); break
+      case 'appointments': text = this.renderList('TERMINE', this.fmtAppts()); break
+      case 'briefing':     text = this.renderBriefing(); break
+      case 'deals':        text = this.renderList(this.state.isInsurance ? 'VERTRÄGE' : 'DEALS', this.fmtDeals()); break
+      case 'comms':        text = this.renderList('KOMMUNIKATION', this.fmtComms()); break
+      case 'tasks':        text = this.renderList(this.state.isInsurance ? 'WV' : 'TASKS', this.fmtTasks()); break
+      default:             text = 'INSURVISION'; break
     }
     await this.updateText(text)
   }
 
-  // ── Header Builder ──
+  // ── Generic List Renderer (exactly 10 lines) ──
 
-  private header(section: string): string {
-    const status = 'G2 ● CONNECTED'
-    const pad = 38 - 'INSURVISION'.length - status.length
-    return `INSURVISION${' '.repeat(Math.max(1, pad))}${status}\n${LINE.slice(0, 38)}\n──── ${section} ────`
-  }
+  private renderList(section: string, items: string[]): string {
+    // Line 1: header
+    const hdr = `INSURVISION          G2 ● CONN`
+    // Line 2: section title
+    const sec = `── ${section} (${items.length}) ──`
 
-  // ── Page dots (shows position in screen flow) ──
-
-  private pageDots(): string {
-    const screenLabels: Record<Screen, string> = {
-      nearby: 'NÄHE', appointments: 'TERMINE', briefing: 'KUNDE',
-      deals: this.state.isInsurance ? 'VERTRÄGE' : 'DEALS',
-      comms: 'KOMM.', tasks: this.state.isInsurance ? 'WV' : 'TASKS',
+    // Lines 3-7: 5 item slots (with cursor ▶)
+    const SLOTS = 5
+    const visible = this.visibleWindow(items, SLOTS)
+    const contentLines: string[] = []
+    for (let i = 0; i < SLOTS; i++) {
+      if (i < visible.length) {
+        const globalIdx = this.state.scrollOffset + i
+        const ptr = globalIdx === this.state.cursor ? '▶' : ' '
+        contentLines.push(`${ptr} ${visible[i]}`)
+      } else {
+        contentLines.push('')
+      }
     }
-    // Show only relevant screens
-    const flow: Screen[] = this.state.selectedContactId
-      ? ['briefing', 'deals', 'comms', 'tasks']
-      : (this.state.nearbyCustomers.length > 0 ? ['nearby', 'appointments'] : ['appointments'])
 
-    return flow.map(s => s === this.state.screen ? `[${screenLabels[s]}]` : ` ${screenLabels[s]} `).join(' ')
+    // Line 8: separator
+    const sep = LINE.slice(0, 36)
+    // Line 9: tab bar
+    const tabs = this.tabBar()
+    // Line 10: nav hint
+    const nav = 'Swipe↕ Wählen  Tap▶  DblTap◀'
+
+    return [hdr, sec, ...contentLines, sep, tabs, nav].join('\n')
   }
 
-  // ── Render: Nearby Customers ──
-
-  private renderNearby(): string {
-    const L: string[] = [this.header('IN DER NÄHE')]
-    const items = this.state.nearbyCustomers
-    if (items.length === 0) {
-      L.push('', '  Keine Kunden in der Nähe')
-    } else {
-      const visible = this.visibleSlice(items, 5)
-      visible.forEach((c, i) => {
-        const idx = this.state.scrollOffset + i
-        const ptr = idx === this.state.cursor ? '▶' : ' '
-        const dist = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
-        const tasks = c.open_tasks > 0 ? ` ●${c.open_tasks}` : ''
-        L.push(`${ptr} ${dist} ${truncate(c.name, 26)}${tasks}`)
-      })
-    }
-    L.push(LINE.slice(0, 38))
-    L.push(this.pageDots())
-    L.push('Scroll ↕ Wählen   Tap ▶   DblTap ◀')
-    return L.join('\n')
-  }
-
-  // ── Render: Appointments ──
-
-  private renderAppointments(): string {
-    const L: string[] = [this.header('TERMINE')]
-    const items = this.state.appointments
-    if (items.length === 0) {
-      L.push('', '  Keine anstehenden Termine')
-    } else {
-      const visible = this.visibleSlice(items, 5)
-      visible.forEach((a, i) => {
-        const idx = this.state.scrollOffset + i
-        const ptr = idx === this.state.cursor ? '▶' : ' '
-        const time = formatTime(a.start_time)
-        const name = a.contact?.name || '–'
-        L.push(`${ptr} ${time} ${truncate(name, 18)} ${truncate(a.title, 12)}`)
-      })
-    }
-    L.push(LINE.slice(0, 38))
-    L.push(this.pageDots())
-    L.push('Scroll ↕ Wählen   Tap ▶   DblTap ◀')
-    return L.join('\n')
-  }
-
-  // ── Render: Customer Briefing ──
+  // ── Briefing Renderer (exactly 10 lines) ──
 
   private renderBriefing(): string {
     const b = this.state.briefing
-    if (!b) return this.header('KUNDE') + '\n\n  Lade Kundendaten...'
+    if (!b) {
+      return [
+        'INSURVISION          G2 ● CONN',
+        '── KUNDE ──',
+        '', '', '  Lade Kundendaten...', '', '',
+        LINE.slice(0, 36), this.tabBar(), ''
+      ].join('\n')
+    }
 
     const c = b.contact
     const isIns = this.state.isInsurance
     const age = c.custom_fields?.birth_date ? formatAge(c.custom_fields.birth_date) : null
 
-    const L: string[] = [this.header('KUNDE')]
-    // Name groß
-    L.push(c.name.toUpperCase() + (age ? `, ${age}J` : ''))
-    // Details
-    const details: string[] = []
-    if (c.custom_fields?.birth_date) details.push(`● ${formatDate(c.custom_fields.birth_date)}`)
-    if (c.category) details.push(`● ${c.category}`)
-    if (details.length) L.push(details.join('  '))
-    if (c.phone) L.push(`☎ ${c.phone}`)
-    L.push(LINE_SHORT)
-    // KPIs
-    const dealLabel = isIns ? 'Verträge' : 'Deals'
-    const valLabel = isIns ? 'Jahresbeitr.' : 'Volumen'
-    L.push(`${b.deals.total} ${dealLabel}   ${formatCurrency(b.deals.total_value)} ${valLabel}`)
+    // Line 1: header
+    const hdr = 'INSURVISION          G2 ● CONN'
+    // Line 2: name
+    const name = truncate(c.name.toUpperCase() + (age ? `, ${age}J` : ''), 38)
+    // Line 3: details
+    const det = truncate([c.category, c.phone].filter(Boolean).join('  ●  '), 38)
+    // Line 4: KPIs
+    const dl = isIns ? 'Verträge' : 'Deals'
+    const kpi = `${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} p.a.`
+    // Line 5: stages/categories
+    const stages = b.deals.by_stage.length > 0
+      ? truncate(b.deals.by_stage.slice(0, 3).map(s => `${s.stage}:${s.count}`).join(' ● '), 38)
+      : ''
+    // Line 6: tasks + commission
+    const tl = isIns ? 'WV' : 'Tasks'
+    const cl = isIns ? 'Schäden' : 'Tickets'
+    let line6 = `${b.open_tasks} ${tl}  ${b.open_tickets} ${cl}`
     if (isIns && b.insurance?.annual_commission) {
-      L.push(`Courtage: ${formatCurrency(b.insurance.annual_commission)}/J`)
+      line6 += `  Crt: ${formatCurrency(b.insurance.annual_commission)}`
     }
-    // Sparten/Stages
-    if (b.deals.by_stage.length > 0) {
-      L.push(b.deals.by_stage.slice(0, 4).map(s => `● ${s.stage}:${s.count}`).join('  '))
-    }
-    // Status
-    const taskLabel = isIns ? 'WV' : 'Tasks'
-    const ticketLabel = isIns ? 'Schäden' : 'Tickets'
-    L.push(`${b.open_tasks} ${taskLabel}  ${b.open_tickets} ${ticketLabel}`)
-    if (b.last_interaction) L.push(`Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
-    L.push(LINE.slice(0, 38))
-    L.push(this.pageDots())
-    L.push('Tap ▶ Verträge   DblTap ◀ Zurück')
-    return L.join('\n')
+    // Line 7: last interaction
+    const last = b.last_interaction
+      ? `Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`
+      : (c.since ? `Kunde seit ${new Date(c.since).getFullYear()}` : '')
+    // Line 8-10: footer
+    const sep = LINE.slice(0, 36)
+    const tabs = this.tabBar()
+    const nav = 'Tap▶ Verträge   DblTap◀ Zurück'
+
+    return [hdr, name, det, kpi, stages, line6, last, sep, tabs, nav].join('\n')
   }
 
-  // ── Render: Deals/Contracts ──
+  // ── Tab Bar (shows current position) ──
 
-  private renderDeals(): string {
-    const isIns = this.state.isInsurance
-    const label = isIns ? 'VERTRÄGE' : 'DEALS'
-    const L: string[] = [this.header(label)]
-    const items = this.state.deals
-    if (items.length === 0) {
-      L.push('', `  Keine ${label.toLowerCase()}`)
-    } else {
-      const visible = this.visibleSlice(items, 5)
-      visible.forEach((d, i) => {
-        const idx = this.state.scrollOffset + i
-        const ptr = idx === this.state.cursor ? '●' : '○'
-        if (isIns) {
-          L.push(`${ptr} ${truncate(d.category || d.name, 14)} ${truncate(d.insurer || '', 12)} ${formatCurrency(d.value)}`)
-        } else {
-          L.push(`${ptr} ${truncate(d.name, 20)} ${formatCurrency(d.value)} [${d.stage}]`)
-        }
-      })
-    }
-    L.push(LINE.slice(0, 38))
-    L.push(this.pageDots())
-    L.push('Tap ▶ Komm.   DblTap ◀ Kunde')
-    return L.join('\n')
+  private tabBar(): string {
+    const labels: [Screen, string][] = this.state.selectedContactId
+      ? [['briefing', 'KUNDE'], ['deals', this.state.isInsurance ? 'VERTR' : 'DEALS'], ['comms', 'KOMM'], ['tasks', this.state.isInsurance ? 'WV' : 'TASKS']]
+      : (this.state.nearbyCustomers.length > 0
+        ? [['nearby', 'NÄHE'], ['appointments', 'TERM']]
+        : [['appointments', 'TERMINE']])
+
+    return labels.map(([s, l]) => s === this.state.screen ? `[${l}]` : ` ${l} `).join('  ')
   }
 
-  // ── Render: Communications ──
+  // ── List Item Formatters ──
 
-  private renderComms(): string {
-    const L: string[] = [this.header('KOMMUNIKATION')]
-    const items = this.state.comms
-    if (items.length === 0) {
-      L.push('', '  Keine Kommunikation')
-    } else {
-      const icons: Record<string, string> = {
-        email: '✉', phone: '☎', whatsapp: 'W', note: '✎', letter: '✉',
+  private fmtNearby(): string[] {
+    return this.state.nearbyCustomers.map(c => {
+      const d = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
+      const t = c.open_tasks > 0 ? ` !${c.open_tasks}` : ''
+      return truncate(`${d} ${c.name}${t}`, 34)
+    })
+  }
+
+  private fmtAppts(): string[] {
+    return this.state.appointments.map(a => {
+      const time = formatTime(a.start_time)
+      const name = a.contact?.name || '–'
+      return truncate(`${time} ${name} | ${a.title}`, 34)
+    })
+  }
+
+  private fmtDeals(): string[] {
+    return this.state.deals.map(d => {
+      if (this.state.isInsurance) {
+        return truncate(`${d.category || d.name} ${d.insurer || ''} ${formatCurrency(d.value)}`, 34)
       }
-      const visible = this.visibleSlice(items, 5)
-      visible.forEach((c, i) => {
-        const idx = this.state.scrollOffset + i
-        const ptr = idx === this.state.cursor ? '▶' : ' '
-        const icon = icons[c.type] || '•'
-        const dir = c.direction === 'inbound' ? '←' : '→'
-        const date = formatDate(c.date)
-        L.push(`${ptr}${icon}${dir} ${date} ${truncate(c.subject || c.preview || '–', 22)}`)
-      })
-    }
-    L.push(LINE.slice(0, 38))
-    L.push(this.pageDots())
-    L.push('Tap ▶ Aufgaben   DblTap ◀ Verträge')
-    return L.join('\n')
+      return truncate(`${d.name} ${formatCurrency(d.value)} [${d.stage}]`, 34)
+    })
   }
 
-  // ── Render: Tasks ──
-
-  private renderTasks(): string {
-    const isIns = this.state.isInsurance
-    const label = isIns ? 'WIEDERVORLAGEN' : 'TASKS'
-    const L: string[] = [this.header(label)]
-    const items = this.state.tasks
-    if (items.length === 0) {
-      L.push('', `  Keine offenen ${label.toLowerCase()}`)
-    } else {
-      const visible = this.visibleSlice(items, 5)
-      visible.forEach((t, i) => {
-        const idx = this.state.scrollOffset + i
-        const ptr = idx === this.state.cursor ? '▶' : ' '
-        const prio = priorityIcon(t.priority)
-        L.push(`${ptr} ${formatDate(t.due_date)} ${truncate(t.title, 22)} ${prio}`)
-      })
-    }
-    L.push(LINE.slice(0, 38))
-    L.push(this.pageDots())
-    L.push('Tap ▶ Kunde   DblTap ◀ Komm.')
-    return L.join('\n')
+  private fmtComms(): string[] {
+    const ic: Record<string, string> = { email: '✉', phone: '☎', whatsapp: 'W', note: '✎', letter: '✉' }
+    return this.state.comms.map(c => {
+      const icon = ic[c.type] || '•'
+      const dir = c.direction === 'inbound' ? '←' : '→'
+      return truncate(`${icon}${dir} ${formatDate(c.date)} ${c.subject || c.preview || '–'}`, 34)
+    })
   }
 
-  // ── Helpers ──
+  private fmtTasks(): string[] {
+    return this.state.tasks.map(t => {
+      const p = priorityIcon(t.priority)
+      return truncate(`${formatDate(t.due_date)} ${t.title} ${p}`, 34)
+    })
+  }
 
-  /** Get visible window of items based on cursor position */
-  private visibleSlice<T>(items: T[], maxVisible: number): T[] {
+  // ── Visible Window (keeps cursor in view) ──
+
+  private visibleWindow<T>(items: T[], slots: number): T[] {
     const total = items.length
-    if (total <= maxVisible) {
+    if (total <= slots) {
       this.state.scrollOffset = 0
       return items
     }
-    // Keep cursor in view
     let start = this.state.scrollOffset
     if (this.state.cursor < start) start = this.state.cursor
-    if (this.state.cursor >= start + maxVisible) start = this.state.cursor - maxVisible + 1
-    start = Math.max(0, Math.min(total - maxVisible, start))
+    if (this.state.cursor >= start + slots) start = this.state.cursor - slots + 1
+    start = Math.max(0, Math.min(total - slots, start))
     this.state.scrollOffset = start
-    return items.slice(start, start + maxVisible)
+    return items.slice(start, start + slots)
   }
 }
