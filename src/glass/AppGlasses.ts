@@ -62,13 +62,21 @@ interface State {
   selectedContactId: string | null
 }
 
-/** Request GPS position */
+/** Request GPS position with hard timeout */
 function getGPS(): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error('No GPS'))
-    navigator.geolocation.getCurrentPosition(resolve, reject, {
-      enableHighAccuracy: true, timeout: 10000, maximumAge: 300000,
-    })
+
+    let done = false
+    const hardTimeout = setTimeout(() => {
+      if (!done) { done = true; reject(new Error('GPS timeout (5s)')) }
+    }, 5000)
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { if (!done) { done = true; clearTimeout(hardTimeout); resolve(pos) } },
+      (err) => { if (!done) { done = true; clearTimeout(hardTimeout); reject(err) } },
+      { enableHighAccuracy: false, timeout: 4000, maximumAge: 600000 }
+    )
   })
 }
 
@@ -122,23 +130,24 @@ export class AppGlasses {
     this.state.provider = info.provider
     this.state.isInsurance = info.provider === 'insurcrm'
 
-    // Load GPS + nearby customers
-    await this.showText('  INSURVISION\n  Standort wird ermittelt...')
-    let hasLocation = false
-    try {
-      const pos = await getGPS()
-      const res = await getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15)
-      this.state.nearbyCustomers = res.customers
-      hasLocation = true
-    } catch (e) {
-      this.state.locationError = e instanceof Error ? e.message : 'GPS nicht verfügbar'
-    }
+    // Load appointments + GPS in parallel (don't block on GPS)
+    await this.showText('  INSURVISION\n  Lade Daten...')
 
-    // Load appointments in parallel
-    try {
-      const res = await getNextAppointments(10)
-      this.state.appointments = res.appointments
-    } catch {}
+    let hasLocation = false
+    const [, appointmentsRes] = await Promise.all([
+      // GPS + nearby (may fail/timeout — that's OK)
+      getGPS()
+        .then(pos => getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15))
+        .then(res => { this.state.nearbyCustomers = res.customers; hasLocation = true })
+        .catch(e => {
+          console.log('[IV] GPS/nearby failed:', e)
+          this.state.locationError = e instanceof Error ? e.message : 'GPS nicht verfügbar'
+        }),
+      // Appointments (always load)
+      getNextAppointments(10).catch(() => ({ appointments: [] as VisionAppointment[] })),
+    ])
+
+    this.state.appointments = appointmentsRes.appointments
 
     // Show appropriate start screen
     if (hasLocation && this.state.nearbyCustomers.length > 0) {
