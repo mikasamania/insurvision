@@ -177,12 +177,16 @@ export class AppGlasses {
   // ── Event Handling ──
 
   private handleEvent(event: any): void {
+    // Try ALL possible event locations — SDK structure varies
     const textEv = event?.textEvent
     const listEv = event?.listEvent
-    const ev = textEv || listEv
-    if (!ev) return
+    const sysEv = event?.sysEvent
+    const ev = textEv || listEv || sysEv || event
 
-    const et = ev.eventType
+    // Extract eventType from wherever it lives
+    let et: number | undefined = ev?.eventType
+    // Fallback: check top-level event
+    if (et === undefined && event?.eventType !== undefined) et = event.eventType
 
     // Ignore system events (FOREGROUND_ENTER etc.)
     if (typeof et === 'number' && et >= 4) return
@@ -316,13 +320,11 @@ export class AppGlasses {
   // ── Generic List Renderer (exactly 10 lines) ──
 
   private renderList(section: string, items: string[]): string {
-    // Line 1: header
-    const hdr = `INSURVISION          G2 ● CONN`
-    // Line 2: section title
+    // Line 1: section title with count
     const sec = `── ${section} (${items.length}) ──`
 
-    // Lines 3-7: 5 item slots (with cursor ▶)
-    const SLOTS = 5
+    // Lines 2-9: 8 item slots (with cursor ▶)
+    const SLOTS = 8
     const visible = this.visibleWindow(items, SLOTS)
     const contentLines: string[] = []
     for (let i = 0; i < SLOTS; i++) {
@@ -335,75 +337,49 @@ export class AppGlasses {
       }
     }
 
-    // Line 8: separator
-    const sep = LINE.slice(0, 36)
-    // Line 9: tab bar
-    const tabs = this.tabBar()
-    // Line 10: nav hint
-    const nav = 'Swipe↕ Wählen  Tap▶  DblTap◀'
+    // Line 10: scroll indicator
+    const total = items.length
+    const pos = total > SLOTS ? ` ${this.state.cursor + 1}/${total}` : ''
+    const scrollHint = total > SLOTS ? `↕${pos}` : ''
 
-    return [hdr, sec, ...contentLines, sep, tabs, nav].join('\n')
+    return [sec, ...contentLines, scrollHint].join('\n')
   }
 
   // ── Briefing Renderer (exactly 10 lines) ──
 
   private renderBriefing(): string {
     const b = this.state.briefing
-    if (!b) {
-      return [
-        'INSURVISION          G2 ● CONN',
-        '── KUNDE ──',
-        '', '', '  Lade Kundendaten...', '', '',
-        LINE.slice(0, 36), this.tabBar(), ''
-      ].join('\n')
-    }
+    if (!b) return '── KUNDE ──\n\nLade Kundendaten...'
 
     const c = b.contact
     const isIns = this.state.isInsurance
     const age = c.custom_fields?.birth_date ? formatAge(c.custom_fields.birth_date) : null
 
-    // Line 1: header
-    const hdr = 'INSURVISION          G2 ● CONN'
-    // Line 2: name
-    const name = truncate(c.name.toUpperCase() + (age ? `, ${age}J` : ''), 38)
-    // Line 3: details
-    const det = truncate([c.category, c.phone].filter(Boolean).join('  ●  '), 38)
-    // Line 4: KPIs
+    const L: string[] = []
+    // Name
+    L.push(c.name.toUpperCase() + (age ? `, ${age}J` : ''))
+    // Category + phone
+    if (c.category || c.phone) L.push([c.category, c.phone].filter(Boolean).join(' ● '))
+    // KPIs
     const dl = isIns ? 'Verträge' : 'Deals'
-    const kpi = `${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} p.a.`
-    // Line 5: stages/categories
-    const stages = b.deals.by_stage.length > 0
-      ? truncate(b.deals.by_stage.slice(0, 3).map(s => `${s.stage}:${s.count}`).join(' ● '), 38)
-      : ''
-    // Line 6: tasks + commission
+    L.push(`${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} p.a.`)
+    // Categories
+    if (b.deals.by_stage.length > 0) {
+      L.push(b.deals.by_stage.slice(0, 4).map(s => `${s.stage}:${s.count}`).join(' ● '))
+    }
+    // Tasks + commission
     const tl = isIns ? 'WV' : 'Tasks'
     const cl = isIns ? 'Schäden' : 'Tickets'
-    let line6 = `${b.open_tasks} ${tl}  ${b.open_tickets} ${cl}`
+    let statusLine = `${b.open_tasks} ${tl}  ${b.open_tickets} ${cl}`
     if (isIns && b.insurance?.annual_commission) {
-      line6 += `  Crt: ${formatCurrency(b.insurance.annual_commission)}`
+      statusLine += `  Crt:${formatCurrency(b.insurance.annual_commission)}`
     }
-    // Line 7: last interaction
-    const last = b.last_interaction
-      ? `Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`
-      : (c.since ? `Kunde seit ${new Date(c.since).getFullYear()}` : '')
-    // Line 8-10: footer
-    const sep = LINE.slice(0, 36)
-    const tabs = this.tabBar()
-    const nav = 'Tap▶ Verträge   DblTap◀ Zurück'
+    L.push(statusLine)
+    // Last interaction
+    if (b.last_interaction) L.push(`Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
+    if (c.since) L.push(`Kunde seit ${new Date(c.since).getFullYear()}`)
 
-    return [hdr, name, det, kpi, stages, line6, last, sep, tabs, nav].join('\n')
-  }
-
-  // ── Tab Bar (shows current position) ──
-
-  private tabBar(): string {
-    const labels: [Screen, string][] = this.state.selectedContactId
-      ? [['briefing', 'KUNDE'], ['deals', this.state.isInsurance ? 'VERTR' : 'DEALS'], ['comms', 'KOMM'], ['tasks', this.state.isInsurance ? 'WV' : 'TASKS']]
-      : (this.state.nearbyCustomers.length > 0
-        ? [['nearby', 'NÄHE'], ['appointments', 'TERM']]
-        : [['appointments', 'TERMINE']])
-
-    return labels.map(([s, l]) => s === this.state.screen ? `[${l}]` : ` ${l} `).join('  ')
+    return L.map(l => truncate(l, 38)).join('\n')
   }
 
   // ── List Item Formatters ──
