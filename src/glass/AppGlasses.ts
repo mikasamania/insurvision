@@ -138,30 +138,38 @@ export class AppGlasses {
     )
 
     // Register event handler
+    // G2 OsEventTypeList: CLICK=0, SCROLL_TOP=1, SCROLL_BOTTOM=2, DOUBLE_CLICK=3,
+    //   FOREGROUND_ENTER=4, FOREGROUND_EXIT=5, ABNORMAL_EXIT=6, SYSTEM_EXIT=7, IMU=8
     this.bridge.onEvent((event: EvenHubEvent) => {
-      // Extract the actual event payload (SDK wraps in textEvent/listEvent/sysEvent)
       const raw = event as any
       const ev = raw?.textEvent ?? raw?.listEvent ?? raw?.sysEvent
       const et = ev?.eventType
 
-      console.log('[IV] eventType:', et, 'full:', JSON.stringify(event).slice(0, 200))
+      console.log('[IV] et:', et)
 
-      // Map G2 event types to glass actions
-      // OsEventTypeList: CLICK=0, SCROLL_TOP=1, SCROLL_BOTTOM=2, DOUBLE_CLICK=4
+      // Skip non-input events (foreground/background/exit/IMU)
+      if (typeof et === 'number' && et >= 4) return
+
+      // Try even-toolkit mapper first (handles debouncing)
       let action = mapGlassEvent(event)
 
-      // Only use fallback for explicit known event types (NOT undefined/null)
-      if (!action && ev && typeof et === 'number') {
-        switch (et) {
-          case 0: action = { type: 'SELECT_HIGHLIGHTED' }; break
-          case 1: action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }; break
-          case 2: action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }; break
-          case 4: action = { type: 'GO_BACK' }; break
+      // Direct fallback if mapGlassEvent was blocked by debounce
+      if (!action && ev) {
+        if (et === 0 || et === undefined || et === null) {
+          // CLICK_EVENT (0) or undefined (simulator quirk)
+          action = { type: 'SELECT_HIGHLIGHTED' }
+        } else if (et === 1) {
+          action = { type: 'HIGHLIGHT_MOVE', direction: 'up' }
+        } else if (et === 2) {
+          action = { type: 'HIGHLIGHT_MOVE', direction: 'down' }
+        } else if (et === 3) {
+          // DOUBLE_CLICK_EVENT
+          action = { type: 'GO_BACK' }
         }
       }
 
       if (action) {
-        console.log('[IV] action:', action.type, 'screen:', this.nav.screen, 'idx:', this.nav.highlightedIndex)
+        console.log('[IV]', action.type, 'scr:', this.nav.screen, 'idx:', this.nav.highlightedIndex)
         this.nav = onGlassAction(action, this.nav, this.snapshot, this.actions)
         this.render()
       }
