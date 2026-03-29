@@ -98,8 +98,19 @@ export class AppGlasses {
     await this.bridge.init()
     this.raw = this.bridge.rawBridge
 
-    // Show splash
-    await this.showText('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Initialisiere...')
+    // IMPORTANT: Must render an initial page via even-toolkit before using raw bridge
+    await this.bridge.setupTextPage()
+    await this.bridge.showTextPage('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Initialisiere...')
+
+    // Small delay to let firmware settle after initial page
+    await new Promise(r => setTimeout(r, 300))
+
+    // Now show splash via raw bridge (or fallback)
+    try {
+      await this.showText('  INSURVISION\n  Smart Glasses CRM\n────────────────────────────\n  Initialisiere...')
+    } catch (e) {
+      console.error('[IV] showText failed, raw bridge may not work:', e)
+    }
 
     // Register events
     this.bridge.onEvent((event: EvenHubEvent) => this.handleEvent(event))
@@ -297,7 +308,12 @@ export class AppGlasses {
   // ── Native List Page (firmware scroll-highlight!) ──
 
   private async renderList(title: string, items: string[], footer: string): Promise<void> {
-    if (!this.raw) return
+    if (!this.raw) {
+      // Fallback: render as text via even-toolkit
+      const text = `── ${title} ──\n${items.map((it, i) => `${i + 1}. ${it}`).join('\n')}\n────────────────────────────\n${footer}`
+      await this.bridge.showTextPage(text)
+      return
+    }
 
     const listItems = items.slice(0, 20).map((text, i) =>
       new ListItemContainerProperty({ itemID: i, itemName: truncate(text, 64) } as any)
@@ -451,26 +467,30 @@ export class AppGlasses {
   // ── Low-level helpers ──
 
   private async showText(content: string): Promise<void> {
-    if (!this.raw) {
-      // Fallback to even-toolkit bridge
-      await this.bridge.showTextPage(content)
-      return
+    // Always try raw bridge first, fall back to even-toolkit
+    if (this.raw) {
+      try {
+        await this.raw.rebuildPageContainer(
+          new RebuildPageContainer({
+            containerTotalNum: 1,
+            textObject: [
+              new TextContainerProperty({
+                containerID: 1, containerName: 'main',
+                xPosition: 0, yPosition: 0, width: 576, height: 288,
+                borderWidth: 0, borderColor: 0, paddingLength: 8,
+                content, isEventCapture: 1,
+              } as any),
+            ] as any,
+            listObject: [] as any,
+            imageObject: [] as any,
+          })
+        )
+        return
+      } catch (e) {
+        console.error('[IV] rebuildPageContainer failed:', e)
+      }
     }
-
-    await this.raw.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: 1,
-        textObject: [
-          new TextContainerProperty({
-            containerID: 1, containerName: 'main',
-            xPosition: 0, yPosition: 0, width: 576, height: 288,
-            borderWidth: 0, borderColor: 0, paddingLength: 8,
-            content, isEventCapture: 1,
-          } as any),
-        ] as any,
-        listObject: [] as any,
-        imageObject: [] as any,
-      })
-    )
+    // Fallback
+    await this.bridge.showTextPage(content)
   }
 }
