@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "pack": "npm run build && evenhub-cli pack app.json dist"
+    "build": "tsc && vite build && npx @evenrealities/evenhub-cli pack app.json dist -o dist/insurvision.ehpk",
+    "pack": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
