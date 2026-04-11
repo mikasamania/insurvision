@@ -1,15 +1,30 @@
 /**
  * InsurVision G2 Glasses Controller
  *
- * Uses even-toolkit's battle-tested bridge + event mapping.
- * Display modes:
- *   - Column mode (3 columns) for lists (nearby, appointments, deals)
- *   - Text mode for detail views (briefing)
- * Events via mapGlassEvent (handles G2 quirks, debounce, edge cases)
+ * CRITICAL DISPLAY PATTERN (from paddle-even-g2 reference):
+ * Two text containers per page:
+ *   ID 1 'evt': INVISIBLE overlay, content=' ', isEventCapture=1
+ *   ID 2 'scr': VISIBLE content, isEventCapture=0
+ *
+ * This prevents firmware from hijacking scroll events for internal scrolling.
+ * Events come through container 1 cleanly. Content renders in container 2.
+ *
+ * Formatting uses even-toolkit's glass-format utils:
+ *   fieldJoin(), kvLine(), progressBar(), glassBox(), drillLabel()
  */
-import { EvenHubBridge } from 'even-toolkit/bridge'
-import { mapGlassEvent } from 'even-toolkit/action-map'
-import type { GlassAction } from 'even-toolkit/types'
+import {
+  waitForEvenAppBridge,
+  CreateStartUpPageContainer,
+  RebuildPageContainer,
+  TextContainerProperty,
+  TextContainerUpgrade,
+  OsEventTypeList,
+} from '@evenrealities/even_hub_sdk'
+import type { EvenAppBridge } from '@evenrealities/even_hub_sdk'
+
+import { fieldJoin, kvLine, progressBar, drillLabel } from '../utils/glass-format'
+import { glassBox, glassRule } from '../utils/box-drawing'
+import { truncate } from '../utils/truncate'
 
 import {
   getNextAppointments,
@@ -33,9 +48,12 @@ import type {
 } from '../types/api'
 import type { ProcessListItem } from '../api/client'
 import { formatTime, formatDate, formatCurrency, formatAge, priorityIcon } from '../utils/formatter'
-import { truncate } from '../utils/truncate'
 import { STTManager } from './consultation/stt-manager'
 import { CoachingManager } from './consultation/coaching-manager'
+
+// ── Display Constants ──
+const W = 576
+const H = 288
 
 type Screen =
   | 'nearby' | 'appointments' | 'briefing' | 'deals' | 'comms' | 'tasks'
@@ -46,6 +64,7 @@ interface State {
   provider: string
   isInsurance: boolean
   cursor: number
+  scrollOffset: number
   nearbyCustomers: NearbyCustomer[]
   appointments: VisionAppointment[]
   briefing: VisionContactBriefing | null
@@ -54,7 +73,6 @@ interface State {
   comms: VisionCommunication[]
   selectedContactId: string | null
   selectedContactName: string
-  // Consultation state
   stt: STTManager | null
   coaching: CoachingManager | null
   coachingHints: string[]
@@ -62,13 +80,6 @@ interface State {
   processes: ProcessListItem[]
   displayTimer: ReturnType<typeof setInterval> | null
 }
-
-// Column widths for 3-column layout (576px total)
-const COL_CFG = [
-  { x: 0, w: 140 },    // Col 1: indicator + short info
-  { x: 140, w: 280 },  // Col 2: main text
-  { x: 420, w: 156 },  // Col 3: values
-]
 
 function getGPS(): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
@@ -84,47 +95,49 @@ function getGPS(): Promise<GeolocationPosition> {
 }
 
 export class AppGlasses {
-  private bridge: EvenHubBridge
+  private bridge!: EvenAppBridge
+  private startupDone = false
   private state: State = {
     screen: 'appointments', provider: 'unknown', isInsurance: false,
-    cursor: 0,
+    cursor: 0, scrollOffset: 0,
     nearbyCustomers: [], appointments: [],
     briefing: null, deals: [], tasks: [], comms: [],
     selectedContactId: null, selectedContactName: '',
     stt: null, coaching: null, coachingHints: [],
     consultSessionId: '', processes: [], displayTimer: null,
   }
-  private busy = false // prevent concurrent async operations
-
-  constructor() {
-    this.bridge = new EvenHubBridge(COL_CFG)
-  }
+  private busy = false
 
   async init(): Promise<void> {
-    // 1. Init bridge (creates pages, gets raw bridge)
-    await this.bridge.init()
+    // 1. Get raw bridge
+    this.bridge = await waitForEvenAppBridge()
 
-    // 2. Show loading text
-    await this.bridge.showTextPage('INSURVISION\n\nVerbinde...')
+    // 2. Create startup page: invisible event overlay + visible content
+    await this.bridge.createStartUpPageContainer(
+      new CreateStartUpPageContainer(this.buildPage('INSURVISION\n\nVerbinde...'))
+    )
+    this.startupDone = true
 
-    // 3. Register events — use BOTH paths for reliability
-    // Path A: even-toolkit's addEventListener
-    this.bridge.onEvent((event) => {
-      const action = mapGlassEvent(event)
-      if (action) this.handleAction(action)
+    // 3. Register events on the bridge
+    this.bridge.onEvenHubEvent((event: any) => {
+      const ev = event?.textEvent ?? event?.listEvent ?? event?.sysEvent
+      if (!ev) return
+      const et = ev.eventType
+      if (typeof et === 'number' && et >= 4) return // system events
+
+      if (et === OsEventTypeList.CLICK_EVENT || et === undefined || et === null) {
+        this.onTap()
+      } else if (et === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+        this.onDoubleTap()
+      } else if (et === OsEventTypeList.SCROLL_TOP_EVENT) {
+        this.onScroll(-1)
+      } else if (et === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+        this.onScroll(1)
+      }
     })
-    // Path B: raw bridge onEvenHubEvent as fallback
-    const raw = this.bridge.rawBridge
-    if (raw) {
-      raw.onEvenHubEvent((event: any) => {
-        // mapGlassEvent handles textEvent/listEvent/sysEvent extraction
-        const action = mapGlassEvent(event)
-        if (action) this.handleAction(action)
-      })
-    }
 
     // 4. Load data
-    await this.bridge.updateText('INSURVISION\n\nLade Daten...')
+    await this.updateContent('INSURVISION\n\nLade Daten...')
 
     let hasLocation = false
     await Promise.allSettled([
@@ -139,90 +152,84 @@ export class AppGlasses {
         .then(res => { this.state.appointments = res.appointments }),
     ])
 
-    // 5. Pick screen + render
+    // 5. Render
     this.state.screen = (hasLocation && this.state.nearbyCustomers.length > 0) ? 'nearby' : 'appointments'
     this.state.cursor = 0
     await this.render()
   }
 
-  // ── Event Handling (via even-toolkit mapGlassEvent) ──
+  // ── Page Builder (dual container: invisible evt + visible content) ──
 
-  private handleAction(action: GlassAction): void {
-    if (this.busy) return
-    const s = this.state
-
-    switch (action.type) {
-      case 'SELECT_HIGHLIGHTED':
-        this.onSelect()
-        break
-      case 'HIGHLIGHT_MOVE':
-        // Consultation screens: no cursor movement
-        if (s.screen === 'consulting') return
-        // Detail screens: swipe switches tabs
-        if (s.screen === 'briefing' || s.screen === 'consult-confirm') {
-          if (action.direction === 'down') this.onNextScreen()
-          else this.onPrevScreen()
-        } else if (s.screen === 'process-select' || s.screen === 'save-note') {
-          this.onMove(action.direction === 'down' ? 1 : -1)
-        } else {
-          this.onMove(action.direction === 'down' ? 1 : -1)
-        }
-        break
-      case 'GO_BACK':
-        this.onBack()
-        break
+  private buildPage(content: string): any {
+    return {
+      containerTotalNum: 2,
+      textObject: [
+        new TextContainerProperty({
+          containerID: 1, containerName: 'evt',
+          content: ' ', // invisible — captures all events
+          xPosition: 0, yPosition: 0, width: W, height: H,
+          isEventCapture: 1, paddingLength: 0,
+          borderWidth: 0, borderColor: 0,
+        } as any),
+        new TextContainerProperty({
+          containerID: 2, containerName: 'scr',
+          content,
+          xPosition: 0, yPosition: 0, width: W, height: H,
+          isEventCapture: 0, paddingLength: 6,
+          borderWidth: 0, borderColor: 0,
+        } as any),
+      ],
+      imageObject: [],
     }
   }
 
-  private onMove(dir: number): void {
+  /** Update visible content (flicker-free, no page rebuild) */
+  private async updateContent(content: string): Promise<void> {
+    const trimmed = content.slice(0, 1900)
+    try {
+      await this.bridge.textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: 2, containerName: 'scr',
+          contentOffset: 0, contentLength: 2000,
+          content: trimmed,
+        } as any)
+      )
+    } catch (e) {
+      console.error('[IV] update error:', e)
+    }
+  }
+
+  // ── Events ──
+
+  private onTap(): void {
+    if (this.busy) return
+    this.doSelect()
+  }
+
+  private onDoubleTap(): void {
+    if (this.busy) return
+    this.doBack()
+  }
+
+  private onScroll(dir: number): void {
+    if (this.busy) return
+    const s = this.state
+
+    // Detail screens: swipe = next/prev screen tab
+    if (['briefing', 'deals', 'comms', 'tasks', 'consult-confirm'].includes(s.screen)) {
+      if (dir > 0) this.doNextTab()
+      else this.doPrevTab()
+      return
+    }
+
+    // List screens: move cursor
     const max = this.getListLength() - 1
     if (max < 0) return
-    const newCursor = Math.max(0, Math.min(max, this.state.cursor + dir))
-    if (newCursor !== this.state.cursor) {
-      this.state.cursor = newCursor
+    const nc = Math.max(0, Math.min(max, s.cursor + dir))
+    if (nc !== s.cursor) {
+      s.cursor = nc
       this.render()
     }
-  }
-
-  /** Swipe forward on detail screens = next tab */
-  private async onNextScreen(): Promise<void> {
-    if (this.busy) return
-    this.busy = true
-    const s = this.state
-    const cid = s.selectedContactId
-    try {
-      switch (s.screen) {
-        case 'briefing':
-          if (cid) { try { s.deals = (await getContactDeals(cid)).deals } catch {} }
-          s.screen = 'deals'; s.cursor = 0; break
-        case 'deals':
-          if (cid) { try { s.comms = (await getContactCommunications(cid)).communications } catch {} }
-          s.screen = 'comms'; s.cursor = 0; break
-        case 'comms':
-          if (cid) { try { s.tasks = (await getContactTasks(cid)).tasks } catch {} }
-          s.screen = 'tasks'; s.cursor = 0; break
-        case 'tasks':
-          // After tasks → consultation confirmation
-          s.screen = 'consult-confirm'; s.cursor = 0; break
-        case 'consult-confirm':
-          s.screen = 'briefing'; s.cursor = 0; break
-      }
-      await this.render()
-    } finally { this.busy = false }
-  }
-
-  /** Swipe back on detail screens = prev tab */
-  private async onPrevScreen(): Promise<void> {
-    if (this.busy) return
-    const s = this.state
-    switch (s.screen) {
-      case 'briefing': break // already at start
-      case 'deals': s.screen = 'briefing'; break
-      case 'comms': s.screen = 'deals'; break
-      case 'tasks': s.screen = 'comms'; break
-    }
-    s.cursor = 0
-    await this.render()
   }
 
   private getListLength(): number {
@@ -232,14 +239,15 @@ export class AppGlasses {
       case 'deals': return this.state.deals.length
       case 'comms': return this.state.comms.length
       case 'tasks': return this.state.tasks.length
+      case 'process-select': return this.state.processes.length + 1
       default: return 0
     }
   }
 
-  private async onSelect(): Promise<void> {
-    if (this.busy) return
-    this.busy = true
+  // ── Select (Tap) ──
 
+  private async doSelect(): Promise<void> {
+    this.busy = true
     try {
       const s = this.state
       switch (s.screen) {
@@ -253,455 +261,435 @@ export class AppGlasses {
           if (a?.contact?.id) { s.selectedContactId = a.contact.id; s.selectedContactName = a.contact.name; await this.loadBriefing(a.contact.id) }
           break
         }
-        // On detail/list screens: tap = next screen
         case 'briefing':
         case 'deals':
         case 'comms':
         case 'tasks':
-          await this.onNextScreen()
-          return // onNextScreen handles busy flag
-
-        // Consultation flow
+          await this.doNextTab()
+          break
         case 'consult-confirm':
           await this.startConsultation()
-          return
-
-        case 'consulting':
-          // Tap during consulting → do nothing (recording in progress)
           break
-
+        case 'consulting':
+          s.screen = 'consult-stop'
+          await this.render()
+          break
         case 'consult-stop':
-          // Tap = confirm stop → go to save note
           await this.stopConsultation()
-          return
-
-        case 'save-note':
-          // Tap = save with new process
-          if (s.selectedContactId) await this.saveNote(null)
-          return
-
+          break
         case 'process-select': {
-          // Tap = select process and save
-          const proc = s.processes[s.cursor]
-          if (proc && s.selectedContactId) await this.saveNote(proc.id)
-          return
+          const processes = s.processes
+          if (s.cursor < processes.length) {
+            await this.saveNote(processes[s.cursor].id)
+          } else {
+            await this.saveNote(undefined) // new process
+          }
+          break
         }
+        case 'save-note':
+          break // saving in progress
       }
-    } finally {
-      this.busy = false
-    }
+    } finally { this.busy = false }
   }
 
-  private async onBack(): Promise<void> {
-    if (this.busy) return
+  // ── Back (DoubleTap) ──
+
+  private async doBack(): Promise<void> {
+    const s = this.state
+    if (s.screen === 'consulting') {
+      s.screen = 'consult-stop'
+      await this.render()
+      return
+    }
+    if (['consult-stop', 'consult-confirm', 'save-note', 'process-select'].includes(s.screen)) {
+      s.screen = 'briefing'
+      s.cursor = 0
+      await this.render()
+      return
+    }
+    if (['briefing', 'deals', 'comms', 'tasks'].includes(s.screen)) {
+      s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'
+      s.cursor = 0; s.selectedContactId = null
+      await this.render()
+      return
+    }
+    if (s.screen === 'nearby') { s.screen = 'appointments'; s.cursor = 0; await this.render() }
+    else if (s.screen === 'appointments' && s.nearbyCustomers.length > 0) { s.screen = 'nearby'; s.cursor = 0; await this.render() }
+  }
+
+  // ── Tab Navigation (Swipe on detail screens) ──
+
+  private async doNextTab(): Promise<void> {
+    this.busy = true
+    const s = this.state; const cid = s.selectedContactId
+    try {
+      switch (s.screen) {
+        case 'briefing':
+          if (cid) try { s.deals = (await getContactDeals(cid)).deals } catch {}
+          s.screen = 'deals'; break
+        case 'deals':
+          if (cid) try { s.comms = (await getContactCommunications(cid)).communications } catch {}
+          s.screen = 'comms'; break
+        case 'comms':
+          if (cid) try { s.tasks = (await getContactTasks(cid)).tasks } catch {}
+          s.screen = 'tasks'; break
+        case 'tasks':
+          s.screen = 'consult-confirm'; break
+        case 'consult-confirm':
+          s.screen = 'briefing'; break
+      }
+      s.cursor = 0
+      await this.render()
+    } finally { this.busy = false }
+  }
+
+  private async doPrevTab(): Promise<void> {
     const s = this.state
     switch (s.screen) {
-      case 'nearby': s.screen = 'appointments'; break
-      case 'appointments': if (s.nearbyCustomers.length > 0) s.screen = 'nearby'; break
-      case 'briefing': s.screen = s.nearbyCustomers.length > 0 ? 'nearby' : 'appointments'; break
       case 'deals': s.screen = 'briefing'; break
       case 'comms': s.screen = 'deals'; break
       case 'tasks': s.screen = 'comms'; break
       case 'consult-confirm': s.screen = 'tasks'; break
-      case 'consulting': s.screen = 'consult-stop'; break // Show stop confirmation
-      case 'consult-stop': s.screen = 'consulting'; break // Cancel stop → resume
-      case 'save-note': s.screen = 'process-select'; break // Switch to process select
-      case 'process-select': s.screen = 'save-note'; break // Back to save options
+      default: return
     }
     s.cursor = 0
     await this.render()
   }
 
+  // ── Data Loading ──
+
   private async loadBriefing(contactId: string): Promise<void> {
     this.state.deals = []; this.state.tasks = []; this.state.comms = []
-    this.state.screen = 'briefing'
-    this.state.cursor = 0
-    await this.showTextMode('Lade Kundendaten...')
+    this.state.screen = 'briefing'; this.state.cursor = 0
+    await this.updateContent('Lade Kundendaten...')
     try {
       try { this.state.briefing = await getPreparedBriefing(contactId) }
       catch { this.state.briefing = await getContactBriefing(contactId) }
-    } catch (e) {
-      console.error('[IV] briefing error:', e)
-    }
+    } catch {}
     await this.render()
   }
 
-  // ── Render ──
-
-  private async render(): Promise<void> {
-    const s = this.state
-
-    // Text mode screens
-    const textScreens: Screen[] = ['briefing', 'consult-confirm', 'consulting', 'consult-stop', 'save-note']
-    if (textScreens.includes(s.screen)) {
-      let text: string
-      switch (s.screen) {
-        case 'briefing': text = this.renderBriefing(); break
-        case 'consult-confirm': text = this.renderConsultConfirm(); break
-        case 'consulting': text = this.renderConsulting(); break
-        case 'consult-stop': text = this.renderConsultStop(); break
-        case 'save-note': text = this.renderSaveNote(); break
-        default: text = ''; break
-      }
-      await this.showTextMode(text)
-      return
-    }
-
-    // Column/list mode screens
-    const [col1, col2, col3] = this.renderColumns()
-    if (this.bridge.currentMode === 'columns') {
-      await this.bridge.updateColumns([col1, col2, col3])
-    } else {
-      await this.bridge.showColumnPage([col1, col2, col3])
-    }
-  }
-
-  // ── Column Renderers (3 columns for list screens) ──
-
-  private renderColumns(): [string, string, string] {
-    switch (this.state.screen) {
-      case 'nearby': return this.colsNearby()
-      case 'appointments': return this.colsAppts()
-      case 'deals': return this.colsDeals()
-      case 'comms': return this.colsComms()
-      case 'tasks': return this.colsTasks()
-      case 'process-select': return this.colsProcesses()
-      default: return ['', '', '']
-    }
-  }
-
-  private colsNearby(): [string, string, string] {
-    const items = this.state.nearbyCustomers
-    const c1: string[] = ['IN DER NÄHE']
-    const c2: string[] = [`${items.length} Kunden`]
-    const c3: string[] = ['']
-
-    for (let i = 0; i < items.length; i++) {
-      const c = items[i]
-      const ptr = i === this.state.cursor ? '▶' : ' '
-      const d = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
-      c1.push(`${ptr} ${d}`)
-      c2.push(truncate(c.name, 24))
-      const t = c.open_tasks > 0 ? `!${c.open_tasks}` : ''
-      c3.push(t)
-    }
-
-    return [c1.join('\n'), c2.join('\n'), c3.join('\n')]
-  }
-
-  private colsAppts(): [string, string, string] {
-    const items = this.state.appointments
-    const c1: string[] = ['TERMINE']
-    const c2: string[] = [`${items.length} Einträge`]
-    const c3: string[] = ['']
-
-    for (let i = 0; i < items.length; i++) {
-      const a = items[i]
-      const ptr = i === this.state.cursor ? '▶' : ' '
-      c1.push(`${ptr} ${formatTime(a.start_time)}`)
-      c2.push(truncate(a.contact?.name || '–', 24))
-      c3.push(truncate(a.title, 14))
-    }
-
-    return [c1.join('\n'), c2.join('\n'), c3.join('\n')]
-  }
-
-  private colsDeals(): [string, string, string] {
-    const items = this.state.deals
-    const isIns = this.state.isInsurance
-    const label = isIns ? 'VERTRÄGE' : 'DEALS'
-    const c1: string[] = [label]
-    const c2: string[] = [`${items.length} Einträge`]
-    const c3: string[] = ['']
-
-    for (let i = 0; i < items.length; i++) {
-      const d = items[i]
-      const ptr = i === this.state.cursor ? '●' : '○'
-      c1.push(`${ptr} ${truncate(d.category || d.name, 12)}`)
-      c2.push(truncate(d.insurer || d.stage || '', 24))
-      c3.push(formatCurrency(d.value))
-    }
-
-    return [c1.join('\n'), c2.join('\n'), c3.join('\n')]
-  }
-
-  private colsComms(): [string, string, string] {
-    const items = this.state.comms
-    const icons: Record<string, string> = { email: '✉', phone: '☎', whatsapp: 'W', note: '✎', letter: '✉' }
-    const c1: string[] = ['KOMMUNIKATION']
-    const c2: string[] = [`${items.length} Einträge`]
-    const c3: string[] = ['']
-
-    for (let i = 0; i < items.length; i++) {
-      const c = items[i]
-      const ptr = i === this.state.cursor ? '▶' : ' '
-      const icon = icons[c.type] || '•'
-      const dir = c.direction === 'inbound' ? '←' : '→'
-      c1.push(`${ptr}${icon}${dir} ${formatDate(c.date)}`)
-      c2.push(truncate(c.subject || c.preview || '–', 24))
-      c3.push('')
-    }
-
-    return [c1.join('\n'), c2.join('\n'), c3.join('\n')]
-  }
-
-  private colsTasks(): [string, string, string] {
-    const items = this.state.tasks
-    const isIns = this.state.isInsurance
-    const label = isIns ? 'WIEDERVORLAGEN' : 'TASKS'
-    const c1: string[] = [label]
-    const c2: string[] = [`${items.length} Einträge`]
-    const c3: string[] = ['']
-
-    for (let i = 0; i < items.length; i++) {
-      const t = items[i]
-      const ptr = i === this.state.cursor ? '▶' : ' '
-      c1.push(`${ptr} ${formatDate(t.due_date)}`)
-      c2.push(truncate(t.title, 24))
-      c3.push(priorityIcon(t.priority))
-    }
-
-    return [c1.join('\n'), c2.join('\n'), c3.join('\n')]
-  }
-
-  // ── Consultation Methods ──
+  // ── Consultation ──
 
   private async startConsultation(): Promise<void> {
-    this.busy = true
+    const s = this.state
+    s.consultSessionId = crypto.randomUUID()
+    s.coachingHints = []
+    s.screen = 'consulting'
+
     try {
-      const s = this.state
-      s.consultSessionId = crypto.randomUUID()
-      s.coachingHints = []
-
-      // Init STT
       s.stt = new STTManager()
-      const started = await s.stt.start()
-      if (!started) {
-        await this.showTextMode('STT-Fehler\n\nMikrofon nicht verfügbar.\nDblTap = Zurück')
-        s.screen = 'consult-confirm'
-        return
-      }
+      await s.stt.start()
+    } catch (e) {
+      console.error('[IV] STT init failed:', e)
+    }
 
-      // Init coaching
-      s.coaching = new CoachingManager(
-        s.selectedContactId!,
-        () => s.stt?.getTranscript() || ''
-      )
-      s.coaching.onHints((hints) => {
+    if (s.selectedContactId) {
+      s.coaching = new CoachingManager(s.selectedContactId, () => s.stt?.getTranscript() || '')
+      s.coaching.onHints((hints: string[]) => {
         s.coachingHints = hints
-        if (s.screen === 'consulting') this.render()
+        this.render()
       })
       s.coaching.start()
-
-      // Subscribe to transcript updates
-      s.stt.onUpdate(() => {
-        if (s.screen === 'consulting') this.render()
-      })
-
-      // Start display timer (update every 2s for duration counter)
-      s.displayTimer = setInterval(() => {
-        if (s.screen === 'consulting') this.render()
-      }, 2000)
-
-      s.screen = 'consulting'
-      await this.render()
-    } finally {
-      this.busy = false
     }
+
+    // Live timer display
+    const startTime = Date.now()
+    s.displayTimer = setInterval(() => {
+      if (s.screen === 'consulting') {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000)
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0')
+        const ss = String(elapsed % 60).padStart(2, '0')
+        this.updateContent(this.renderConsulting(mm, ss))
+      }
+    }, 1000)
+
+    await this.render()
   }
 
   private async stopConsultation(): Promise<void> {
-    this.busy = true
-    try {
-      const s = this.state
-      // Stop recording
-      if (s.stt) await s.stt.stop()
-      if (s.coaching) s.coaching.stop()
-      if (s.displayTimer) { clearInterval(s.displayTimer); s.displayTimer = null }
+    const s = this.state
+    if (s.displayTimer) { clearInterval(s.displayTimer); s.displayTimer = null }
+    s.coaching?.stop()
+    s.stt?.stop()
 
-      // Load processes for selection
-      if (s.selectedContactId) {
-        try { s.processes = (await listProcesses(s.selectedContactId)).processes } catch {}
-      }
-
-      s.screen = 'save-note'
-      s.cursor = 0
-      await this.render()
-    } finally {
-      this.busy = false
+    // Load processes for selection
+    if (s.selectedContactId) {
+      try { s.processes = (await listProcesses(s.selectedContactId)).processes } catch {}
     }
+    s.screen = 'process-select'
+    s.cursor = 0
+    await this.render()
   }
 
-  private async saveNote(processId: string | null): Promise<void> {
-    this.busy = true
+  private async saveNote(processId: string | undefined): Promise<void> {
+    const s = this.state
+    s.screen = 'save-note'
+    await this.updateContent('Speichere Notiz...')
+
     try {
-      const s = this.state
-      const transcript = s.stt?.getTranscript() || ''
+      const transcript = s.stt?.getTranscript() || 'Kein Transkript'
       const duration = s.stt?.getDuration() || 0
+      await saveConsultation({
+        contact_id: s.selectedContactId!,
+        transcript,
+        duration_seconds: duration,
+        session_id: s.consultSessionId,
+        process_id: processId,
+        process_title: processId ? undefined : `Beratung ${s.selectedContactName}`,
+      })
+      await this.updateContent(
+        `${glassRule(20)}\n` +
+        `Notiz gespeichert\n` +
+        `${s.selectedContactName}\n` +
+        `${Math.floor(duration / 60)} Min. aufgezeichnet\n` +
+        `${glassRule(20)}`
+      )
+      await new Promise(r => setTimeout(r, 2000))
+    } catch (e) {
+      await this.updateContent(`Fehler: ${e instanceof Error ? e.message : 'Unbekannt'}`)
+      await new Promise(r => setTimeout(r, 2000))
+    }
 
-      await this.showTextMode('Wird gespeichert...\n\nKI erstellt Zusammenfassung...')
+    s.stt = null; s.coaching = null
+    s.screen = 'briefing'; s.cursor = 0
+    await this.render()
+  }
 
-      try {
-        const res = await saveConsultation({
-          contact_id: s.selectedContactId!,
-          transcript,
-          duration_seconds: duration,
-          session_id: s.consultSessionId,
-          process_id: processId || undefined,
-          process_title: processId ? undefined : `Beratung ${s.selectedContactName} ${formatDate(new Date().toISOString())}`,
-        })
+  // ── Render Dispatcher ──
 
-        // Show success
-        const summary = truncate(res.summary, 120)
-        await this.showTextMode(`✓ GESPEICHERT\n\n${summary}\n\nTopics: ${res.topics.slice(0, 3).join(', ')}`)
-        await new Promise(r => setTimeout(r, 3000))
-      } catch (e) {
-        await this.showTextMode(`Fehler beim Speichern\n\n${e instanceof Error ? e.message : 'Unbekannter Fehler'}`)
-        await new Promise(r => setTimeout(r, 2000))
-      }
+  private async render(): Promise<void> {
+    const text = this.buildScreen()
+    await this.updateContent(text)
+  }
 
-      // Cleanup
-      s.stt = null
-      s.coaching = null
-      s.coachingHints = []
-      s.screen = 'briefing'
-      await this.render()
-    } finally {
-      this.busy = false
+  private buildScreen(): string {
+    switch (this.state.screen) {
+      case 'nearby': return this.screenList('IN DER NÄHE', this.fmtNearby())
+      case 'appointments': return this.screenList('TERMINE', this.fmtAppts())
+      case 'briefing': return this.screenBriefing()
+      case 'deals': return this.screenList(this.state.isInsurance ? 'VERTRÄGE' : 'DEALS', this.fmtDeals())
+      case 'comms': return this.screenList('KOMMUNIKATION', this.fmtComms())
+      case 'tasks': return this.screenList(this.state.isInsurance ? 'WIEDERVORLAGEN' : 'TASKS', this.fmtTasks())
+      case 'consult-confirm': return this.screenConsultConfirm()
+      case 'consulting': return this.renderConsulting('00', '00')
+      case 'consult-stop': return this.screenConsultStop()
+      case 'process-select': return this.screenProcessSelect()
+      case 'save-note': return 'Speichere Notiz...'
+      default: return 'INSURVISION'
     }
   }
 
-  private async showTextMode(text: string): Promise<void> {
-    if (this.bridge.currentMode !== 'text') await this.bridge.setupTextPage()
-    await this.bridge.updateText(text)
+  // ── Screen: List (nearby, appointments, deals, comms, tasks) ──
+
+  private screenList(title: string, items: [string, string][]): string {
+    const total = items.length
+    const VISIBLE = 7
+    const L: string[] = []
+
+    // Header
+    L.push(fieldJoin(title, `${total}`))
+    L.push(glassRule(30))
+
+    if (total === 0) {
+      L.push(''); L.push('  Keine Einträge')
+    } else {
+      // Windowed view
+      let start = this.state.scrollOffset
+      if (this.state.cursor < start) start = this.state.cursor
+      if (this.state.cursor >= start + VISIBLE) start = this.state.cursor - VISIBLE + 1
+      start = Math.max(0, Math.min(total - VISIBLE, start))
+      this.state.scrollOffset = start
+
+      const visible = items.slice(start, start + VISIBLE)
+      for (let i = 0; i < visible.length; i++) {
+        const gi = start + i
+        const ptr = gi === this.state.cursor ? '\u25B6' : ' ' // ▶ or space
+        L.push(`${ptr} ${visible[i][0]}`)
+        if (visible[i][1]) L.push(`   ${visible[i][1]}`)
+      }
+
+      // Scroll indicator
+      if (total > VISIBLE) {
+        const pct = Math.round((this.state.cursor / (total - 1)) * 100)
+        L.push(`${progressBar(pct, 15)} ${this.state.cursor + 1}/${total}`)
+      }
+    }
+
+    return L.join('\n')
   }
 
-  // ── Briefing Renderer (text mode) ──
+  // ── Screen: Customer Briefing ──
 
-  private renderBriefing(): string {
+  private screenBriefing(): string {
     const b = this.state.briefing
     if (!b) return 'Lade Kundendaten...'
 
     const c = b.contact
     const isIns = this.state.isInsurance
     const age = c.custom_fields?.birth_date ? formatAge(c.custom_fields.birth_date) : null
-
     const L: string[] = []
-    L.push(`── KUNDE ──`)
-    L.push(c.name.toUpperCase() + (age ? `, ${age}J` : ''))
-    if (c.category) L.push(`${c.category}`)
-    if (c.phone) L.push(`☎ ${c.phone}`)
 
+    // Name card
+    const boxLines = [
+      c.name.toUpperCase() + (age ? `, ${age}J` : ''),
+      fieldJoin(c.category || '', c.phone || ''),
+    ]
+    L.push(...glassBox(boxLines, 30))
+
+    // KPIs
     const dl = isIns ? 'Verträge' : 'Deals'
-    L.push(`${b.deals.total} ${dl}  ${formatCurrency(b.deals.total_value)} p.a.`)
+    L.push(kvLine(dl, `${b.deals.total}  ${formatCurrency(b.deals.total_value)} p.a.`))
+
+    // Categories
     if (b.deals.by_stage.length > 0) {
-      L.push(b.deals.by_stage.slice(0, 3).map(s => `${s.stage}:${s.count}`).join(' ● '))
+      L.push(b.deals.by_stage.slice(0, 3).map(s => `\u25CF${s.stage}:${s.count}`).join('  '))
     }
 
+    // Status
     const tl = isIns ? 'WV' : 'Tasks'
     const cl = isIns ? 'Schäden' : 'Tickets'
-    let status = `${b.open_tasks} ${tl}  ${b.open_tickets} ${cl}`
+    L.push(kvLine(tl, `${b.open_tasks}`))
+    L.push(kvLine(cl, `${b.open_tickets}`))
+
     if (isIns && b.insurance?.annual_commission) {
-      status += `  Crt:${formatCurrency(b.insurance.annual_commission)}`
+      L.push(kvLine('Courtage', `${formatCurrency(b.insurance.annual_commission)}/J`))
     }
-    L.push(status)
 
     if (b.last_interaction) {
-      L.push(`Letzt: ${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
+      L.push(kvLine('Letzt', `${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`))
     }
-    if (c.since) L.push(`Kunde seit ${new Date(c.since).getFullYear()}`)
 
-    return L.map(l => truncate(l, 42)).join('\n')
+    // Tab indicator
+    L.push(glassRule(30))
+    const tabs = this.tabIndicator()
+    L.push(tabs)
+
+    return L.map(l => truncate(l, 44)).join('\n')
   }
 
-  // ── Consultation Renderers ──
+  // ── Tab indicator for detail screens ──
 
-  private renderConsultConfirm(): string {
-    const name = this.state.selectedContactName || 'Kunde'
-    return [
-      '── BERATUNG STARTEN? ──',
-      '',
-      `Kunde: ${name}`,
-      '',
-      'Mikrofon wird aktiviert.',
-      'Gespräch wird transkribiert.',
-      'KI-Coaching während der Beratung.',
-      '',
-      'Tap ▶ Starten',
-      'DblTap ◀ Abbrechen',
-    ].join('\n')
-  }
-
-  private renderConsulting(): string {
-    const s = this.state
-    const name = s.selectedContactName || 'Kunde'
-    const dur = s.stt?.getFormattedDuration() || '00:00'
-    const lines = s.stt?.getRecentLines(4) || []
-
-    const L = [
-      `⏺ BERATUNG  ${dur}`,
-      name,
-      '────────',
+  private tabIndicator(): string {
+    const isIns = this.state.isInsurance
+    const tabs: [Screen, string][] = [
+      ['briefing', 'Kunde'],
+      ['deals', isIns ? 'Vertr.' : 'Deals'],
+      ['comms', 'Komm.'],
+      ['tasks', isIns ? 'WV' : 'Tasks'],
+      ['consult-confirm', 'Berat.'],
     ]
-    // Show recent transcript lines
-    for (const line of lines) {
-      L.push(truncate(line, 42))
-    }
-    // Pad to ensure space for coaching
-    while (L.length < 7) L.push('')
-    // Show coaching hints if available
-    if (s.coachingHints.length > 0) {
-      L.push('────────')
-      for (const hint of s.coachingHints.slice(0, 2)) {
-        L.push(`💡 ${truncate(hint, 38)}`)
-      }
-    }
+    return tabs.map(([s, l]) =>
+      s === this.state.screen ? `\u25B6${l}` : ` ${l} `
+    ).join(' ')
+  }
+
+  // ── Screen: Consultation ──
+
+  private screenConsultConfirm(): string {
+    const L: string[] = []
+    L.push(glassRule(30))
+    L.push('')
+    L.push(`  Beratung starten?`)
+    L.push(`  ${this.state.selectedContactName}`)
+    L.push('')
+    L.push(`  Tap \u25B6 Aufnahme starten`)
+    L.push(`  DblTap \u25C0 Zurück`)
+    L.push('')
+    L.push(glassRule(30))
+    L.push(this.tabIndicator())
     return L.join('\n')
   }
 
-  private renderConsultStop(): string {
-    const dur = this.state.stt?.getFormattedDuration() || '00:00'
-    const wordCount = (this.state.stt?.getTranscript() || '').split(' ').filter(Boolean).length
-    return [
-      '── BERATUNG BEENDEN? ──',
-      '',
-      `Dauer: ${dur}`,
-      `Wörter: ${wordCount}`,
-      '',
-      'Tap ▶ Beenden & Speichern',
-      'DblTap ◀ Weiter aufnehmen',
-    ].join('\n')
-  }
+  private renderConsulting(mm: string, ss: string): string {
+    const L: string[] = []
+    L.push(`\u25CF REC  ${mm}:${ss}`)
+    L.push(this.state.selectedContactName)
+    L.push(glassRule(30))
 
-  private renderSaveNote(): string {
-    const dur = this.state.stt?.getFormattedDuration() || '00:00'
-    const procs = this.state.processes
-    return [
-      '── NOTIZ SPEICHERN ──',
-      '',
-      `${this.state.selectedContactName}, ${dur}`,
-      '',
-      'Tap ▶ Neuer Vorgang anlegen',
-      procs.length > 0 ? 'Swipe ▼ Vorgang auswählen' : 'Keine offenen Vorgänge',
-      '',
-      'DblTap ◀ Vorgang wählen',
-    ].join('\n')
-  }
-
-  private colsProcesses(): [string, string, string] {
-    const items = this.state.processes
-    const c1: string[] = ['VORGANG WÄHLEN']
-    const c2: string[] = [`${items.length} Vorgänge`]
-    const c3: string[] = ['']
-
-    for (let i = 0; i < items.length; i++) {
-      const p = items[i]
-      const ptr = i === this.state.cursor ? '▶' : ' '
-      c1.push(`${ptr} ${truncate(p.process_type, 12)}`)
-      c2.push(truncate(p.title, 24))
-      c3.push(p.status)
+    if (this.state.coachingHints.length > 0) {
+      for (const h of this.state.coachingHints.slice(0, 4)) {
+        L.push(`\u203A ${truncate(h, 40)}`)
+      }
+    } else {
+      L.push('')
+      L.push('  Aufnahme läuft...')
+      L.push('  Coaching-Hinweise erscheinen hier')
     }
 
-    return [c1.join('\n'), c2.join('\n'), c3.join('\n')]
+    L.push('')
+    L.push('DblTap \u25B6 Beenden')
+    return L.join('\n')
+  }
+
+  private screenConsultStop(): string {
+    return [
+      glassRule(30),
+      '',
+      '  Beratung beenden?',
+      '',
+      '  Tap \u25B6 Beenden & Speichern',
+      '  DblTap \u25C0 Weiter aufnehmen',
+      '',
+      glassRule(30),
+    ].join('\n')
+  }
+
+  private screenProcessSelect(): string {
+    const items: [string, string][] = this.state.processes.map(p => [
+      truncate(p.title, 36),
+      fieldJoin(p.status, p.process_type),
+    ])
+    items.push([drillLabel('Neuen Vorgang anlegen'), ''])
+    return this.screenList('VORGANG WÄHLEN', items)
+  }
+
+  // ── List Item Formatters (return [main line, sub line]) ──
+
+  private fmtNearby(): [string, string][] {
+    return this.state.nearbyCustomers.map(c => {
+      const d = c.distance_km < 1 ? `${Math.round(c.distance_km * 1000)}m` : `${c.distance_km.toFixed(1)}km`
+      const main = `${d}  ${c.name}`
+      const sub = fieldJoin(
+        c.contracts_count > 0 ? `${c.contracts_count} Vertr.` : '',
+        c.annual_premium > 0 ? formatCurrency(c.annual_premium) : '',
+        c.open_tasks > 0 ? `!${c.open_tasks} offen` : '',
+      )
+      return [truncate(main, 38), sub]
+    })
+  }
+
+  private fmtAppts(): [string, string][] {
+    return this.state.appointments.map(a => [
+      truncate(`${formatTime(a.start_time)}  ${a.contact?.name || '\u2013'}`, 38),
+      truncate(a.title || '', 36),
+    ])
+  }
+
+  private fmtDeals(): [string, string][] {
+    return this.state.deals.map(d => {
+      if (this.state.isInsurance) {
+        return [
+          truncate(`${d.category || d.name}  ${formatCurrency(d.value)}/J`, 38),
+          truncate(fieldJoin(d.insurer || '', d.policy_number || ''), 36),
+        ]
+      }
+      return [truncate(`${d.name}  ${formatCurrency(d.value)}`, 38), truncate(`[${d.stage}]`, 36)]
+    })
+  }
+
+  private fmtComms(): [string, string][] {
+    const ic: Record<string, string> = { email: '\u2709', phone: '\u260E', whatsapp: 'WA', note: '\u270E', letter: '\u2709' }
+    return this.state.comms.map(c => [
+      truncate(`${ic[c.type] || '\u2022'}${c.direction === 'inbound' ? '\u2190' : '\u2192'} ${formatDate(c.date)}`, 38),
+      truncate(c.subject || c.preview || '\u2013', 36),
+    ])
+  }
+
+  private fmtTasks(): [string, string][] {
+    return this.state.tasks.map(t => [
+      truncate(`${formatDate(t.due_date)} ${priorityIcon(t.priority)}  ${t.title}`, 38),
+      '',
+    ])
   }
 }
