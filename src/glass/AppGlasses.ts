@@ -23,8 +23,13 @@ import {
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk'
 
 import { fieldJoin, kvLine, progressBar, drillLabel } from '../utils/glass-format'
-import { glassBox, glassRule } from '../utils/box-drawing'
+import { glassRule } from '../utils/box-drawing'
 import { truncate } from '../utils/truncate'
+import {
+  sectionHeader, gridRow, statsRow, contractRow, navDots,
+  alertLines, productProposal, noteRow, tabBar, rightAlign, dotSep,
+  rule, DOT_FULL, ARROW_RIGHT, ARROW_LEFT, TRI_UP, WARN,
+} from '../utils/hud-layout'
 
 import {
   getNextAppointments,
@@ -484,42 +489,51 @@ export class AppGlasses {
 
   private screenList(title: string, items: [string, string][]): string {
     const total = items.length
-    const VISIBLE = 7
+    const isDetailScreen = ['deals', 'comms', 'tasks'].includes(this.state.screen)
+    const isMainList = ['nearby', 'appointments'].includes(this.state.screen)
+    // Detail screens reservieren Platz für Nav-Dots → weniger sichtbare Items
+    const VISIBLE = isDetailScreen ? 6 : 7
     const L: string[] = []
 
-    // Header
-    L.push(fieldJoin(title, `${total}`))
-    L.push(glassRule(30))
+    // Section header with count badge
+    L.push(sectionHeader(title, `${total}`))
 
     if (total === 0) {
-      L.push(''); L.push('  Keine Einträge')
+      L.push('')
+      L.push('  Keine Einträge')
     } else {
-      // Windowed view
+      // Windowed scrolling
       let start = this.state.scrollOffset
       if (this.state.cursor < start) start = this.state.cursor
       if (this.state.cursor >= start + VISIBLE) start = this.state.cursor - VISIBLE + 1
-      start = Math.max(0, Math.min(total - VISIBLE, start))
+      start = Math.max(0, Math.min(Math.max(0, total - VISIBLE), start))
       this.state.scrollOffset = start
 
       const visible = items.slice(start, start + VISIBLE)
       for (let i = 0; i < visible.length; i++) {
         const gi = start + i
-        const ptr = gi === this.state.cursor ? '\u25B6' : ' ' // ▶ or space
+        const ptr = gi === this.state.cursor ? ARROW_RIGHT : ' '
         L.push(`${ptr} ${visible[i][0]}`)
         if (visible[i][1]) L.push(`   ${visible[i][1]}`)
       }
 
-      // Scroll indicator
-      if (total > VISIBLE) {
+      // Scroll indicator (nur für Main-Lists mit vielen Items)
+      if (isMainList && total > VISIBLE) {
         const pct = Math.round((this.state.cursor / (total - 1)) * 100)
         L.push(`${progressBar(pct, 15)} ${this.state.cursor + 1}/${total}`)
       }
     }
 
+    // Nav dots für Detail-Screens
+    if (isDetailScreen) {
+      L.push('')
+      L.push(this.renderNavDots())
+    }
+
     return L.join('\n')
   }
 
-  // ── Screen: Customer Briefing ──
+  // ── Screen: Customer Briefing (HUD Mockup Style) ──
 
   private screenBriefing(): string {
     const b = this.state.briefing
@@ -530,108 +544,127 @@ export class AppGlasses {
     const age = c.custom_fields?.birth_date ? formatAge(c.custom_fields.birth_date) : null
     const L: string[] = []
 
-    // Name card
-    const boxLines = [
-      c.name.toUpperCase() + (age ? `, ${age}J` : ''),
-      fieldJoin(c.category || '', c.phone || ''),
+    // Section header: "─── KUNDE ───           ID: xxxx"
+    const shortId = c.id ? c.id.slice(0, 8).toUpperCase() : ''
+    L.push(sectionHeader('KUNDE', shortId ? `ID: ${shortId}` : undefined))
+
+    // Big Name
+    L.push(c.name.toUpperCase() + (age ? `, ${age}J` : ''))
+
+    // Meta line: "· Geb.date · Stadt"
+    const metaParts: string[] = []
+    if (c.custom_fields?.birth_date) metaParts.push(formatDate(c.custom_fields.birth_date))
+    if (c.category) metaParts.push(c.category)
+    if (metaParts.length > 0) L.push(dotSep(...metaParts))
+
+    L.push(rule())
+
+    // KPI Stats Row (3 inline stats)
+    const stats: { label: string; value: string }[] = [
+      { label: isIns ? 'Verträge' : 'Deals', value: String(b.deals.total) },
+      { label: isIns ? 'Jahresbeitr.' : 'Volumen', value: formatCurrency(b.deals.total_value) },
     ]
-    L.push(...glassBox(boxLines, 30))
-
-    // KPIs
-    const dl = isIns ? 'Verträge' : 'Deals'
-    L.push(kvLine(dl, `${b.deals.total}  ${formatCurrency(b.deals.total_value)} p.a.`))
-
-    // Categories
-    if (b.deals.by_stage.length > 0) {
-      L.push(b.deals.by_stage.slice(0, 3).map(s => `\u25CF${s.stage}:${s.count}`).join('  '))
-    }
-
-    // Status
-    const tl = isIns ? 'WV' : 'Tasks'
-    const cl = isIns ? 'Schäden' : 'Tickets'
-    L.push(kvLine(tl, `${b.open_tasks}`))
-    L.push(kvLine(cl, `${b.open_tickets}`))
-
     if (isIns && b.insurance?.annual_commission) {
-      L.push(kvLine('Courtage', `${formatCurrency(b.insurance.annual_commission)}/J`))
+      stats.push({ label: 'Courtage', value: formatCurrency(b.insurance.annual_commission) })
+    } else if (b.open_tickets > 0 || b.open_tasks > 0) {
+      stats.push({ label: isIns ? 'Schäden' : 'Tickets', value: String(b.open_tickets) })
+    }
+    const [kpiLabels, kpiValues] = statsRow(stats)
+    L.push(kpiLabels)
+    L.push(kpiValues)
+
+    // Sparten-Dots (wenn vorhanden)
+    if (b.deals.by_stage.length > 0) {
+      const sparten = b.deals.by_stage.slice(0, 4).map(s => `${DOT_FULL} ${s.stage}:${s.count}`).join('  ')
+      L.push(sparten)
     }
 
+    // Tasks + last interaction (kompakt)
+    const statusParts: string[] = []
+    if (b.open_tasks > 0) statusParts.push(`${b.open_tasks} ${isIns ? 'WV' : 'Tasks'}`)
     if (b.last_interaction) {
-      L.push(kvLine('Letzt', `${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`))
+      statusParts.push(`${formatDate(b.last_interaction.date)} ${b.last_interaction.type}`)
     }
+    if (statusParts.length > 0) L.push(dotSep(...statusParts))
 
-    // Tab indicator
-    L.push(glassRule(30))
-    const tabs = this.tabIndicator()
-    L.push(tabs)
+    // Nav dots at bottom
+    L.push('')
+    L.push(this.renderNavDots())
 
     return L.map(l => truncate(l, 44)).join('\n')
   }
 
-  // ── Tab indicator for detail screens ──
+  // ── Tab indicator for detail screens (nav dots + label) ──
 
-  private tabIndicator(): string {
-    const isIns = this.state.isInsurance
-    const tabs: [Screen, string][] = [
-      ['briefing', 'Kunde'],
-      ['deals', isIns ? 'Vertr.' : 'Deals'],
-      ['comms', 'Komm.'],
-      ['tasks', isIns ? 'WV' : 'Tasks'],
-      ['consult-confirm', 'Berat.'],
-    ]
-    return tabs.map(([s, l]) =>
-      s === this.state.screen ? `\u25B6${l}` : ` ${l} `
-    ).join(' ')
+  private renderNavDots(): string {
+    const tabs = this.detailTabs()
+    const activeIdx = tabs.findIndex(([s]) => s === this.state.screen)
+    if (activeIdx < 0) return ''
+    const activeLabel = tabs[activeIdx][1]
+    return navDots(tabs.length, activeIdx, activeLabel)
   }
 
-  // ── Screen: Consultation ──
+  private detailTabs(): [Screen, string][] {
+    const isIns = this.state.isInsurance
+    return [
+      ['briefing', 'KUNDE'],
+      ['deals', isIns ? 'VERTRÄGE' : 'DEALS'],
+      ['comms', 'KOMM.'],
+      ['tasks', isIns ? 'WV' : 'TASKS'],
+      ['consult-confirm', 'BERAT.'],
+    ]
+  }
+
+  // ── Screen: Consultation (HUD Mockup Style) ──
 
   private screenConsultConfirm(): string {
     const L: string[] = []
-    L.push(glassRule(30))
+    L.push(sectionHeader('BERATUNG'))
     L.push('')
     L.push(`  Beratung starten?`)
+    L.push('')
     L.push(`  ${this.state.selectedContactName}`)
     L.push('')
-    L.push(`  Tap \u25B6 Aufnahme starten`)
-    L.push(`  DblTap \u25C0 Zurück`)
+    L.push(`  ${ARROW_RIGHT} Tap    → Aufnahme starten`)
+    L.push(`  ${ARROW_LEFT} DblTap → Zurück`)
     L.push('')
-    L.push(glassRule(30))
-    L.push(this.tabIndicator())
+    L.push(this.renderNavDots())
     return L.join('\n')
   }
 
   private renderConsulting(mm: string, ss: string): string {
     const L: string[] = []
-    L.push(`\u25CF REC  ${mm}:${ss}`)
-    L.push(this.state.selectedContactName)
-    L.push(glassRule(30))
+    // REC-Zeile mit Pulsing-Dot & Timer
+    L.push(rightAlign(`${DOT_FULL} REC  ${mm}:${ss}`, this.state.selectedContactName, 42))
+    L.push(rule())
 
     if (this.state.coachingHints.length > 0) {
-      for (const h of this.state.coachingHints.slice(0, 4)) {
-        L.push(`\u203A ${truncate(h, 40)}`)
+      L.push('COACHING:')
+      for (const h of this.state.coachingHints.slice(0, 5)) {
+        L.push(`${ARROW_RIGHT} ${truncate(h, 40)}`)
       }
     } else {
       L.push('')
-      L.push('  Aufnahme läuft...')
-      L.push('  Coaching-Hinweise erscheinen hier')
+      L.push('  Aufnahme läuft…')
+      L.push('  Coaching erscheint live')
+      L.push('')
     }
 
-    L.push('')
-    L.push('DblTap \u25B6 Beenden')
+    L.push(rule())
+    L.push('DblTap → Beenden')
     return L.join('\n')
   }
 
   private screenConsultStop(): string {
     return [
-      glassRule(30),
+      sectionHeader('BERATUNG BEENDEN'),
       '',
-      '  Beratung beenden?',
+      '  Gespräch wirklich beenden?',
       '',
-      '  Tap \u25B6 Beenden & Speichern',
-      '  DblTap \u25C0 Weiter aufnehmen',
+      `  ${ARROW_RIGHT} Tap    → Beenden & Speichern`,
+      `  ${ARROW_LEFT} DblTap → Weiter aufnehmen`,
       '',
-      glassRule(30),
+      rule(),
     ].join('\n')
   }
 
@@ -669,13 +702,25 @@ export class AppGlasses {
   private fmtDeals(): [string, string][] {
     return this.state.deals.map(d => {
       if (this.state.isInsurance) {
-        return [
-          truncate(`${d.category || d.name}  ${formatCurrency(d.value)}/J`, 38),
-          truncate(fieldJoin(d.insurer || '', d.policy_number || ''), 36),
-        ]
+        // HUD Mockup Style: "● PHV  Haftpflichtkasse  €86"
+        const status = this.dealStatusIcon(d.stage)
+        const sparte = (d.category || d.name).slice(0, 8).padEnd(8)
+        const insurer = (d.insurer || '-').slice(0, 16)
+        const price = formatCurrency(d.value)
+        // Main line mit allen Infos rechts-ausgerichtet
+        const main = rightAlign(`${status} ${sparte} ${insurer}`, price, 40)
+        return [main, '']
       }
       return [truncate(`${d.name}  ${formatCurrency(d.value)}`, 38), truncate(`[${d.stage}]`, 36)]
     })
+  }
+
+  private dealStatusIcon(stage: string | null | undefined): string {
+    const s = (stage || '').toLowerCase()
+    if (s.includes('active') || s.includes('aktiv')) return DOT_FULL
+    if (s.includes('pending') || s.includes('prüf') || s.includes('check')) return '\u25D0' // ◐
+    if (s.includes('cancel') || s.includes('gekündig')) return WARN
+    return DOT_FULL
   }
 
   private fmtComms(): [string, string][] {
