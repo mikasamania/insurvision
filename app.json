@@ -1,7 +1,7 @@
 {
   "package_id": "de.insur360.insurvision",
   "name": "InsurVision",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "edition": "202601",
   "description": "CRM-Daten auf deiner Even G2 Brille — egal welches CRM du nutzt.",
   "author": "Insur360",
