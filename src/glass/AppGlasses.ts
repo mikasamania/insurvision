@@ -112,34 +112,65 @@ export class AppGlasses {
     consultSessionId: '', processes: [], displayTimer: null,
   }
   private busy = false
+  // Debug: Event-Zähler sichtbar im Footer anzeigen
+  private evtCount = 0
+  private lastEvt = '-'
 
   async init(): Promise<void> {
     // 1. Get raw bridge
     this.bridge = await waitForEvenAppBridge()
 
-    // 2. Create startup page: invisible event overlay + visible content
+    // 2. Register events FIRST (before any page creation)
+    //    Log every event and show diagnostic info on screen.
+    this.bridge.onEvenHubEvent((event: any) => {
+      try {
+        this.evtCount++
+
+        // Normalize event shape (SDK varies)
+        const textEv = event?.textEvent
+        const listEv = event?.listEvent
+        const sysEv = event?.sysEvent
+        const ev = textEv ?? listEv ?? sysEv ?? event
+        const et = ev?.eventType
+
+        // Track last event for on-screen diagnostics
+        const etName =
+          et === 0 ? 'TAP' :
+          et === 1 ? 'UP' :
+          et === 2 ? 'DOWN' :
+          et === 3 ? 'DBL' :
+          et === undefined || et === null ? 'TAP?' :
+          et >= 4 ? `SYS${et}` : `?${et}`
+        this.lastEvt = etName
+
+        console.log('[IV] event', this.evtCount, etName, JSON.stringify(event).slice(0, 200))
+
+        // Skip system events (foreground/background/exit/imu)
+        if (typeof et === 'number' && et >= 4) {
+          this.refreshDiagFooter()
+          return
+        }
+
+        // Map event type to action
+        if (et === OsEventTypeList.CLICK_EVENT || et === undefined || et === null || et === 0) {
+          this.onTap()
+        } else if (et === OsEventTypeList.DOUBLE_CLICK_EVENT || et === 3) {
+          this.onDoubleTap()
+        } else if (et === OsEventTypeList.SCROLL_TOP_EVENT || et === 1) {
+          this.onScroll(-1)
+        } else if (et === OsEventTypeList.SCROLL_BOTTOM_EVENT || et === 2) {
+          this.onScroll(1)
+        }
+      } catch (e) {
+        console.error('[IV] event handler error:', e)
+      }
+    })
+
+    // 3. Create startup page: invisible event overlay + visible content
     await this.bridge.createStartUpPageContainer(
       new CreateStartUpPageContainer(this.buildPage('INSURVISION\n\nVerbinde...'))
     )
     this.startupDone = true
-
-    // 3. Register events on the bridge
-    this.bridge.onEvenHubEvent((event: any) => {
-      const ev = event?.textEvent ?? event?.listEvent ?? event?.sysEvent
-      if (!ev) return
-      const et = ev.eventType
-      if (typeof et === 'number' && et >= 4) return // system events
-
-      if (et === OsEventTypeList.CLICK_EVENT || et === undefined || et === null) {
-        this.onTap()
-      } else if (et === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-        this.onDoubleTap()
-      } else if (et === OsEventTypeList.SCROLL_TOP_EVENT) {
-        this.onScroll(-1)
-      } else if (et === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-        this.onScroll(1)
-      }
-    })
 
     // 4. Load data
     await this.updateContent('INSURVISION\n\nLade Daten...')
@@ -263,7 +294,16 @@ export class AppGlasses {
         }
         case 'appointments': {
           const a = s.appointments[s.cursor]
-          if (a?.contact?.id) { s.selectedContactId = a.contact.id; s.selectedContactName = a.contact.name; await this.loadBriefing(a.contact.id) }
+          if (a?.contact?.id) {
+            s.selectedContactId = a.contact.id
+            s.selectedContactName = a.contact.name
+            await this.loadBriefing(a.contact.id)
+          } else {
+            // Kein Contact am Termin → Cursor vorrücken (sichtbare Reaktion)
+            const max = s.appointments.length - 1
+            s.cursor = (s.cursor + 1) > max ? 0 : s.cursor + 1
+            await this.render()
+          }
           break
         }
         case 'briefing':
@@ -298,6 +338,8 @@ export class AppGlasses {
   }
 
   // ── Back (DoubleTap) ──
+  //
+  // Immer eine sichtbare Aktion: falls kein "Zurück" möglich, Daten neu laden.
 
   private async doBack(): Promise<void> {
     const s = this.state
@@ -318,8 +360,45 @@ export class AppGlasses {
       await this.render()
       return
     }
-    if (s.screen === 'nearby') { s.screen = 'appointments'; s.cursor = 0; await this.render() }
-    else if (s.screen === 'appointments' && s.nearbyCustomers.length > 0) { s.screen = 'nearby'; s.cursor = 0; await this.render() }
+    // Top-Level Lists (nearby/appointments): toggle zwischen beiden oder reload
+    if (s.screen === 'nearby') {
+      s.screen = 'appointments'; s.cursor = 0
+      await this.render()
+      return
+    }
+    if (s.screen === 'appointments') {
+      if (s.nearbyCustomers.length > 0) {
+        s.screen = 'nearby'; s.cursor = 0
+        await this.render()
+      } else {
+        // Keine Kunden in der Nähe → Daten neu laden als Fallback-Aktion
+        await this.reloadData()
+      }
+    }
+  }
+
+  /** Daten neu laden (Termine, GPS/Kunden, Provider-Info) */
+  private async reloadData(): Promise<void> {
+    this.busy = true
+    try {
+      await this.updateContent('INSURVISION\n\nDaten werden neu geladen...')
+      await Promise.allSettled([
+        getProviderInfo().then(info => {
+          this.state.provider = info.provider
+          this.state.isInsurance = info.provider === 'insurcrm'
+        }),
+        getGPS()
+          .then(pos => getNearbyCustomers(pos.coords.latitude, pos.coords.longitude, 25, 15))
+          .then(res => { this.state.nearbyCustomers = res.customers })
+          .catch(() => { /* GPS failed, no change */ }),
+        getNextAppointments(10)
+          .then(res => { this.state.appointments = res.appointments }),
+      ])
+      this.state.cursor = 0
+      await this.render()
+    } finally {
+      this.busy = false
+    }
   }
 
   // ── Tab Navigation (Swipe on detail screens) ──
@@ -465,7 +544,15 @@ export class AppGlasses {
 
   private async render(): Promise<void> {
     const text = this.buildScreen()
-    await this.updateContent(text)
+    // Diagnose-Zeile ans Ende hängen: zeigt Events-Zähler + letzten Event-Typ
+    const diag = `\n${this.evtCount} evts · last:${this.lastEvt}`
+    await this.updateContent(text + diag)
+  }
+
+  /** Refresh nur den Footer (für Diagnose nach einem Event) */
+  private async refreshDiagFooter(): Promise<void> {
+    // Kompletter Re-Render — einfacher als nur Footer updaten
+    await this.render()
   }
 
   private buildScreen(): string {
