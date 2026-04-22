@@ -1,18 +1,23 @@
 import { testConnection, getConnectionStatus, saveQRConfig, clearConfig } from './api/client'
 import type { ConnectionStatus } from './api/client'
+import { getStorage, setStorage, removeStorage } from './utils/bridge-storage'
 
 /**
  * Settings page rendered on the smartphone in Even Hub.
  * Supports QR-code scanning and shows connection status.
+ *
+ * Uses bridge-storage (not raw localStorage) so settings persist across
+ * Even Hub webview restarts.
  */
-export function renderSettings(): void {
+export async function renderSettings(): Promise<void> {
   const app = document.getElementById('app')!
 
-  const apiKey = localStorage.getItem('insurvision_api_key') || ''
-  const apiUrl = localStorage.getItem('insurvision_api_url') || ''
-  const refreshInterval = localStorage.getItem('insurvision_refresh') || '15'
-  const showCommission = localStorage.getItem('insurvision_show_commission') !== 'false'
-  const showReminders = localStorage.getItem('insurvision_show_reminders') !== 'false'
+  // Bridge-Storage lesen (fällt auf localStorage zurück)
+  const apiKey = await getStorage('insurvision_api_key')
+  const apiUrl = await getStorage('insurvision_api_url')
+  const refreshInterval = await getStorage('insurvision_refresh') || '15'
+  const showCommission = (await getStorage('insurvision_show_commission')) !== 'false'
+  const showReminders = (await getStorage('insurvision_show_reminders')) !== 'false'
 
   app.innerHTML = `
     <div style="max-width:480px;margin:0 auto;padding:20px;font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#333;">
@@ -123,34 +128,35 @@ export function renderSettings(): void {
 
   document.getElementById('scanQRBtn')!.addEventListener('click', startQRScan)
 
-  document.getElementById('saveBtn')!.addEventListener('click', () => {
-    localStorage.setItem('insurvision_api_key', keyInput.value.trim())
+  document.getElementById('saveBtn')!.addEventListener('click', async () => {
+    statusMsg.innerHTML = '<span style="color:#666;">Speichere…</span>'
+    await setStorage('insurvision_api_key', keyInput.value.trim())
     if (urlInput.value.trim()) {
-      localStorage.setItem('insurvision_api_url', urlInput.value.trim())
+      await setStorage('insurvision_api_url', urlInput.value.trim())
     } else {
-      localStorage.removeItem('insurvision_api_url')
+      await removeStorage('insurvision_api_url')
     }
-    savePreferences()
-    statusMsg.innerHTML = '<span style="color:#16a34a;">✓ Gespeichert</span>'
-    setTimeout(() => { statusMsg.innerHTML = ''; loadConnectionStatus() }, 1500)
+    await savePreferences()
+    statusMsg.innerHTML = '<span style="color:#16a34a;">✓ Gespeichert. App neu öffnen um Brille zu starten.</span>'
+    setTimeout(() => { statusMsg.innerHTML = ''; loadConnectionStatus() }, 2500)
   })
 
   document.getElementById('testBtn')!.addEventListener('click', async () => {
     statusMsg.innerHTML = '<span style="color:#666;">Teste Verbindung...</span>'
-    const origKey = localStorage.getItem('insurvision_api_key')
-    localStorage.setItem('insurvision_api_key', keyInput.value.trim())
+    const origKey = await getStorage('insurvision_api_key')
+    await setStorage('insurvision_api_key', keyInput.value.trim())
     const ok = await testConnection()
-    if (!ok && origKey !== null) localStorage.setItem('insurvision_api_key', origKey)
+    if (!ok && origKey) await setStorage('insurvision_api_key', origKey)
     statusMsg.innerHTML = ok
       ? '<span style="color:#16a34a;">✓ Verbindung erfolgreich!</span>'
       : '<span style="color:#dc2626;">✗ Verbindung fehlgeschlagen</span>'
     if (ok) loadConnectionStatus()
   })
 
-  document.getElementById('disconnectBtn')!.addEventListener('click', () => {
+  document.getElementById('disconnectBtn')!.addEventListener('click', async () => {
     if (confirm('Verbindung wirklich trennen?')) {
-      clearConfig()
-      renderSettings() // Re-render
+      await clearConfig()
+      await renderSettings() // Re-render
     }
   })
 }
@@ -197,16 +203,16 @@ async function loadConnectionStatus(): Promise<void> {
   }
 }
 
-function savePreferences(): void {
-  localStorage.setItem(
+async function savePreferences(): Promise<void> {
+  await setStorage(
     'insurvision_refresh',
     (document.getElementById('refreshSelect') as HTMLSelectElement).value
   )
-  localStorage.setItem(
+  await setStorage(
     'insurvision_show_commission',
     String((document.getElementById('showCommission') as HTMLInputElement).checked)
   )
-  localStorage.setItem(
+  await setStorage(
     'insurvision_show_reminders',
     String((document.getElementById('showReminders') as HTMLInputElement).checked)
   )
@@ -255,10 +261,10 @@ async function startQRScan(): Promise<void> {
           if (barcodes.length > 0) {
             const data = JSON.parse(barcodes[0].rawValue)
             if (data.key) {
-              saveQRConfig(data)
+              await saveQRConfig(data)
               stream.getTracks().forEach((t) => t.stop())
               overlay.remove()
-              renderSettings()
+              await renderSettings()
               return
             }
           }

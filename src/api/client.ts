@@ -12,17 +12,36 @@ import type {
 const DEFAULT_API_URL =
   'https://thejnigrwckubwdhsbwh.supabase.co/functions/v1/insurvision-api'
 
+// In-Memory Cache für sync Zugriff in fetchApi()
+// Wird von warmApiCredentialCache() befüllt aus dem Bridge-Storage.
+let cachedApiKey: string | null = null
+let cachedApiUrl: string | null = null
+
+/**
+ * Initialisiere den API-Credential-Cache einmalig beim App-Start.
+ * Liest den Key aus dem Bridge-Storage (mit Fallback) und cached ihn
+ * für synchrone Zugriffe in fetchApi().
+ */
+export async function warmApiCredentialCache(): Promise<void> {
+  const { getStorage } = await import('../utils/bridge-storage')
+  cachedApiKey = await getStorage('insurvision_api_key', import.meta.env.VITE_API_KEY)
+  cachedApiUrl = await getStorage('insurvision_api_url', import.meta.env.VITE_API_URL)
+}
+
 function getApiUrl(): string {
+  // Cache zuerst, dann localStorage, dann env, dann Default
+  if (cachedApiUrl) return cachedApiUrl
   return (
-    localStorage.getItem('insurvision_api_url') ||
+    (typeof window !== 'undefined' && window.localStorage?.getItem('insurvision_api_url')) ||
     import.meta.env.VITE_API_URL ||
     DEFAULT_API_URL
   )
 }
 
 function getApiKey(): string {
+  if (cachedApiKey) return cachedApiKey
   return (
-    localStorage.getItem('insurvision_api_key') ||
+    (typeof window !== 'undefined' && window.localStorage?.getItem('insurvision_api_key')) ||
     import.meta.env.VITE_API_KEY ||
     ''
   )
@@ -247,14 +266,16 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
-/** Save QR-scanned config to localStorage */
-export function saveQRConfig(data: { key: string; url: string }): void {
-  localStorage.setItem('insurvision_api_key', data.key)
-  if (data.url) localStorage.setItem('insurvision_api_url', data.url)
+/** Save QR-scanned config to Bridge-Storage + localStorage */
+export async function saveQRConfig(data: { key: string; url: string }): Promise<void> {
+  const { setStorage } = await import('../utils/bridge-storage')
+  await setStorage('insurvision_api_key', data.key)
+  if (data.url) await setStorage('insurvision_api_url', data.url)
 }
 
 /** Clear all stored config */
-export function clearConfig(): void {
-  localStorage.removeItem('insurvision_api_key')
-  localStorage.removeItem('insurvision_api_url')
+export async function clearConfig(): Promise<void> {
+  const { removeStorage } = await import('../utils/bridge-storage')
+  await removeStorage('insurvision_api_key')
+  await removeStorage('insurvision_api_url')
 }
